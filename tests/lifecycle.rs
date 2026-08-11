@@ -37,7 +37,7 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
     let tools = client.list_all_tools().await.context("list MCP tools")?;
     let mut names: Vec<_> = tools.iter().map(|tool| tool.name.to_string()).collect();
     names.sort();
-    assert_eq!(names, ["diagnose_failure", "inspect_environment"]);
+    assert_eq!(names, ["diagnose_failure", "inspect_environment", "verify_result"]);
 
     let inspect_arguments = serde_json::from_value(json!({
         "critical_executables": [],
@@ -69,6 +69,21 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
         .structured_content
         .context("diagnose_failure should return structured content")?;
     assert_eq!(structured["failure_class"], "TIMEOUT_CANCELLATION");
+
+    let verify_arguments = serde_json::from_value(json!({
+        "command_exit_code": 0,
+        "mode": "all",
+        "checks": [{"kind": "directory_exists", "path": "."}]
+    }))
+    .context("build verify_result arguments")?;
+    let verify_result = client
+        .call_tool(CallToolRequestParams::new("verify_result").with_arguments(verify_arguments))
+        .await
+        .context("call verify_result")?;
+    let structured = verify_result
+        .structured_content
+        .context("verify_result should return structured content")?;
+    assert_eq!(structured["task_succeeded"], true);
 
     let quit_reason = client.close().await.context("graceful client shutdown")?;
     assert!(matches!(quit_reason, QuitReason::Cancelled | QuitReason::Closed));

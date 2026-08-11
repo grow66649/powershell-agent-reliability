@@ -1,5 +1,6 @@
 pub mod diagnosis;
 pub mod environment;
+pub mod verification;
 
 use diagnosis::{DiagnosisResult, DiagnoseFailureRequest, diagnose_failure};
 use environment::{EnvironmentDigest, InspectEnvironmentRequest, inspect_environment};
@@ -8,6 +9,7 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     tool, tool_handler, tool_router,
 };
+use verification::{VerificationResult, VerifyResultRequest, verify_result};
 
 #[derive(Debug, Clone, Default)]
 pub struct PsrServer;
@@ -33,6 +35,17 @@ impl PsrServer {
         Parameters(request): Parameters<DiagnoseFailureRequest>,
     ) -> Result<Json<DiagnosisResult>, String> {
         diagnose_failure(request).map(Json)
+    }
+
+    #[tool(
+        name = "verify_result",
+        description = "Evaluate explicit deterministic post-conditions independently from command exit status."
+    )]
+    fn verify_result(
+        &self,
+        Parameters(request): Parameters<VerifyResultRequest>,
+    ) -> Result<Json<VerificationResult>, String> {
+        verify_result(request).map(Json)
     }
 }
 
