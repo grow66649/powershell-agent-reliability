@@ -7,6 +7,7 @@ use environment::{EnvironmentDigest, InspectEnvironmentRequest, inspect_environm
 use rmcp::{
     Json, ServerHandler,
     handler::server::wrapper::Parameters,
+    model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
 use verification::{VerificationResult, VerifyResultRequest, verify_result};
@@ -50,4 +51,14 @@ impl PsrServer {
 }
 
 #[tool_handler]
-impl ServerHandler for PsrServer {}
+impl ServerHandler for PsrServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new("powershell-agent-reliability", env!("CARGO_PKG_VERSION"))
+                    .with_title("PowerShell Agent Reliability")
+                    .with_description("Failure-only Windows execution diagnosis and post-condition verification."),
+            )
+            .with_instructions("Use failure-only after a bounded Windows command failure or failed post-condition. Codex Desktop remains the command/process owner. Never request full PATH/environment dumps or weaken sandbox/ACL/security settings.")
+    }
+}
