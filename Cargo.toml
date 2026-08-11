@@ -1,0 +1,15 @@
+[package]
+name = "psr-rmcp-native-canary"
+version = "0.0.0-canary"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+rmcp = { version = "=3.1.2", default-features = false, features = ["macros", "server", "transport-io"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[dev-dependencies]
+anyhow = "1"
+rmcp = { version = "=3.1.2", default-features = false, features = ["client", "transport-child-process"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }
