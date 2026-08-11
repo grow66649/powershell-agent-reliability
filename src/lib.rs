@@ -1,5 +1,7 @@
+pub mod diagnosis;
 pub mod environment;
 
+use diagnosis::{DiagnosisResult, DiagnoseFailureRequest, diagnose_failure};
 use environment::{EnvironmentDigest, InspectEnvironmentRequest, inspect_environment};
 use rmcp::{
     Json, ServerHandler,
@@ -21,6 +23,16 @@ impl PsrServer {
         Parameters(request): Parameters<InspectEnvironmentRequest>,
     ) -> Result<Json<EnvironmentDigest>, String> {
         inspect_environment(request).map(Json)
+    }
+    #[tool(
+        name = "diagnose_failure",
+        description = "Classify bounded Windows/PowerShell failure evidence and return one conservative next action."
+    )]
+    fn diagnose_failure(
+        &self,
+        Parameters(request): Parameters<DiagnoseFailureRequest>,
+    ) -> Result<Json<DiagnosisResult>, String> {
+        diagnose_failure(request).map(Json)
     }
 }
 

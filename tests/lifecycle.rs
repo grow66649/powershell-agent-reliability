@@ -35,23 +35,40 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
     .with_context(|| format!("spawn MCP server at {}", binary.display()))?;
     let mut client = ().serve(transport).await.context("initialize MCP client")?;
     let tools = client.list_all_tools().await.context("list MCP tools")?;
-    let names: Vec<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(names, ["inspect_environment"]);
+    let mut names: Vec<_> = tools.iter().map(|tool| tool.name.to_string()).collect();
+    names.sort();
+    assert_eq!(names, ["diagnose_failure", "inspect_environment"]);
 
-    let arguments = serde_json::from_value(json!({
+    let inspect_arguments = serde_json::from_value(json!({
         "critical_executables": [],
         "task_env_delta": {}
     }))
     .context("build inspect_environment arguments")?;
-    let result = client
-        .call_tool(CallToolRequestParams::new("inspect_environment").with_arguments(arguments))
+    let inspect_result = client
+        .call_tool(
+            CallToolRequestParams::new("inspect_environment").with_arguments(inspect_arguments),
+        )
         .await
         .context("call inspect_environment")?;
-    let structured = result
+    let structured = inspect_result
         .structured_content
         .context("inspect_environment should return structured content")?;
     assert_eq!(structured["schema_version"], 1);
     assert!(structured["path_fingerprint_sha256"].as_str().is_some());
+    let diagnose_arguments = serde_json::from_value(json!({
+        "timed_out": true
+    }))
+    .context("build diagnose_failure arguments")?;
+    let diagnose_result = client
+        .call_tool(
+            CallToolRequestParams::new("diagnose_failure").with_arguments(diagnose_arguments),
+        )
+        .await
+        .context("call diagnose_failure")?;
+    let structured = diagnose_result
+        .structured_content
+        .context("diagnose_failure should return structured content")?;
+    assert_eq!(structured["failure_class"], "TIMEOUT_CANCELLATION");
 
     let quit_reason = client.close().await.context("graceful client shutdown")?;
     assert!(matches!(quit_reason, QuitReason::Cancelled | QuitReason::Closed));
