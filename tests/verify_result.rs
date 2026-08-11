@@ -92,3 +92,50 @@ fn hash_and_absence_checks_are_deterministic_and_private() {
 
 
 
+
+#[test]
+fn invalid_or_empty_post_conditions_fail_closed() {
+    let empty = VerifyResultRequest {
+        command_exit_code: Some(0),
+        cwd: None,
+        mode: VerificationMode::All,
+        checks: vec![],
+    };
+    assert!(verify_result(empty).is_err());
+
+    let invalid_hash = VerifyResultRequest {
+        command_exit_code: Some(0),
+        cwd: None,
+        mode: VerificationMode::All,
+        checks: vec![VerificationCheck::FileSha256 {
+            path: "artifact.txt".to_owned(),
+            expected_sha256: "not-a-sha256".to_owned(),
+        }],
+    };
+    assert!(verify_result(invalid_hash).is_err());
+}
+
+#[test]
+fn any_mode_succeeds_when_one_explicit_check_passes() {
+    let root = fixture_root();
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create fixture root");
+    fs::write(root.join("present.txt"), b"ok").expect("write fixture");
+    let result = verify_result(VerifyResultRequest {
+        command_exit_code: None,
+        cwd: Some(root.display().to_string()),
+        mode: VerificationMode::Any,
+        checks: vec![
+            VerificationCheck::FileExists {
+                path: "missing.txt".to_owned(),
+            },
+            VerificationCheck::FileExists {
+                path: "present.txt".to_owned(),
+            },
+        ],
+    })
+    .expect("verify any mode");
+    assert!(result.task_succeeded);
+    assert_eq!(result.checks.iter().filter(|check| check.passed).count(), 1);
+    let _ = fs::remove_dir_all(&root);
+}

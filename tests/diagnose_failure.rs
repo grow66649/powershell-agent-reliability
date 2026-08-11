@@ -102,3 +102,42 @@ fn post_condition_without_command_exit_does_not_invent_command_failure() {
     .expect("diagnosis without exit code");
     assert_eq!(diagnosis.failure_class, "UNKNOWN");
 }
+#[test]
+fn windowsapps_path_without_access_signal_is_not_enough_for_sandbox_classification() {
+    let diagnosis = diagnose_failure(DiagnoseFailureRequest {
+        exit_code: Some(7),
+        native_process: true,
+        stderr_excerpt: Some("C:\\Program Files\\WindowsApps\\tool.exe returned 7".to_owned()),
+        ..base()
+    })
+    .expect("windowsapps path diagnosis");
+    assert_eq!(diagnosis.failure_class, "NATIVE_PROCESS_OUTCOME");
+}
+
+#[test]
+fn diagnosis_does_not_echo_bounded_log_excerpt() {
+    let sentinel = "Access denied PSR_PRIVATE_SENTINEL";
+    let diagnosis = diagnose_failure(DiagnoseFailureRequest {
+        stderr_excerpt: Some(sentinel.to_owned()),
+        ..base()
+    })
+    .expect("diagnosis");
+    assert_eq!(diagnosis.failure_class, "DESKTOP_SANDBOX_BOUNDARY");
+    let json = serde_json::to_string(&diagnosis).expect("serialize diagnosis");
+    assert!(!json.contains("PSR_PRIVATE_SENTINEL"));
+}
+
+#[test]
+fn invalid_hashes_and_oversized_excerpts_fail_closed() {
+    let invalid_hash = diagnose_failure(DiagnoseFailureRequest {
+        expected_cwd_sha256: Some("bad".to_owned()),
+        ..base()
+    });
+    assert!(invalid_hash.is_err());
+
+    let oversized = diagnose_failure(DiagnoseFailureRequest {
+        stderr_excerpt: Some("x".repeat(4097)),
+        ..base()
+    });
+    assert!(oversized.is_err());
+}

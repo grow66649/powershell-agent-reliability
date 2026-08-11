@@ -284,7 +284,6 @@ fn stderr_indicates_desktop_boundary(stderr: Option<&str>) -> bool {
         "access denied",
         "eperm",
         "createprocessasuserw",
-        "windowsapps",
         "sandbox helper",
         "operation not permitted",
     ]
