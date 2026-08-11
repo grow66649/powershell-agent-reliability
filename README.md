@@ -26,6 +26,7 @@ The companion Skill source lives at `skills/powershell-reliability/` and enforce
 
 ## Build and test
 
+Run the complete local gate with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-local.ps1`. The script builds/tests the Rust server, runs release lifecycle verification, scorer tests, sanitized fixture regression, Python compilation, and `git diff --check` without changing Codex configuration.
 ```powershell
 cargo test
 cargo check
