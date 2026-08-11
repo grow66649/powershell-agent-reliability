@@ -1,0 +1,3 @@
+interface:
+  display_name: "PowerShell Reliability"
+  short_description: "Failure-only Windows diagnosis and result verification"
