@@ -55,3 +55,25 @@ fn request_limits_fail_closed() {
     };
     assert!(inspect_environment(invalid).is_err());
 }
+
+#[test]
+fn oversized_environment_inputs_fail_closed() {
+    let oversized = "x".repeat(32_769);
+    let request = InspectEnvironmentRequest {
+        shell_executable: Some(oversized.clone()),
+        cwd: None,
+        critical_executables: vec![],
+        task_env_delta: Default::default(),
+    };
+    assert!(inspect_environment(request).is_err());
+
+    let mut task_env_delta = BTreeMap::new();
+    task_env_delta.insert("PSR_TEST".to_owned(), oversized);
+    let request = InspectEnvironmentRequest {
+        shell_executable: None,
+        cwd: None,
+        critical_executables: vec![],
+        task_env_delta,
+    };
+    assert!(inspect_environment(request).is_err());
+}

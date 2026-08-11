@@ -13,13 +13,16 @@ const MAX_CHECKS: usize = 32;
 const MAX_PATH_BYTES: usize = 32_768;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VerifyResultRequest {
     #[serde(default)]
     pub command_exit_code: Option<i32>,
     #[serde(default)]
+    #[schemars(extend("maxLength" = 32768))]
     pub cwd: Option<String>,
     #[serde(default)]
     pub mode: VerificationMode,
+    #[schemars(length(min = 1, max = 32))]
     pub checks: Vec<VerificationCheck>,
 }
 
@@ -31,22 +34,28 @@ pub enum VerificationMode {
     Any,
 }
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VerificationCheck {
     FileExists {
+        #[schemars(extend("maxLength" = 32768))]
         path: String,
     },
     FileAbsent {
+        #[schemars(extend("maxLength" = 32768))]
         path: String,
     },
     DirectoryExists {
+        #[schemars(extend("maxLength" = 32768))]
         path: String,
     },
     FileSha256 {
+        #[schemars(extend("maxLength" = 32768))]
         path: String,
+        #[schemars(extend("pattern" = "^[0-9A-Fa-f]{64}$"))]
         expected_sha256: String,
     },
     FileSize {
+        #[schemars(extend("maxLength" = 32768))]
         path: String,
         #[serde(default)]
         min_bytes: Option<u64>,

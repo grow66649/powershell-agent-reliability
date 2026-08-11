@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::BTreeMap,
     env,
     fs::{self, File},
@@ -13,17 +13,23 @@ use sha2::{Digest, Sha256};
 
 const MAX_CRITICAL_EXECUTABLES: usize = 16;
 const MAX_ENV_DELTA_KEYS: usize = 32;
+const MAX_TEXT_BYTES: usize = 32_768;
 const MAX_FILE_HASH_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InspectEnvironmentRequest {
     #[serde(default)]
+    #[schemars(extend("maxLength" = 32768))]
     pub shell_executable: Option<String>,
     #[serde(default)]
+    #[schemars(extend("maxLength" = 32768))]
     pub cwd: Option<String>,
     #[serde(default)]
+    #[schemars(length(max = 16), inner(length(max = 32768)))]
     pub critical_executables: Vec<String>,
     #[serde(default)]
+    #[schemars(extend("maxProperties" = 32))]
     pub task_env_delta: BTreeMap<String, String>,
 }
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -135,23 +141,35 @@ fn validate_request(request: &InspectEnvironmentRequest) -> Result<(), String> {
     if request.task_env_delta.len() > MAX_ENV_DELTA_KEYS {
         return Err(format!("task_env_delta exceeds limit of {MAX_ENV_DELTA_KEYS}"));
     }
-    if request
-        .critical_executables
-        .iter()
-        .any(|name| name.is_empty() || name.contains('\0'))
-    {
-        return Err("critical executable names must be non-empty and NUL-free".to_owned());
+
+    for (name, value) in [
+        ("shell_executable", request.shell_executable.as_deref()),
+        ("cwd", request.cwd.as_deref()),
+    ] {
+        if value.is_some_and(|text| text.len() > MAX_TEXT_BYTES || text.contains('\0')) {
+            return Err(format!("{name} must be bounded and NUL-free"));
+        }
     }
-    if request
-        .task_env_delta
-        .keys()
-        .any(|key| key.is_empty() || key.contains('=') || key.contains('\0'))
-    {
-        return Err("task_env_delta keys must be valid environment names".to_owned());
+
+    if request.critical_executables.iter().any(|name| {
+        name.is_empty() || name.len() > MAX_TEXT_BYTES || name.contains('\0')
+    }) {
+        return Err("critical executable names must be non-empty, bounded, and NUL-free".to_owned());
+    }
+
+    for (key, value) in &request.task_env_delta {
+        if key.is_empty()
+            || key.len() > MAX_TEXT_BYTES
+            || key.contains('=')
+            || key.contains('\0')
+            || value.len() > MAX_TEXT_BYTES
+            || value.contains('\0')
+        {
+            return Err("task_env_delta entries must be bounded and valid".to_owned());
+        }
     }
     Ok(())
 }
-
 fn shell_identity(requested: &str) -> Result<ShellIdentity, String> {
     let resolved = resolve_executable(requested);
     let family = shell_family(

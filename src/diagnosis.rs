@@ -4,12 +4,15 @@ use serde::{Deserialize, Serialize};
 const MAX_EXCERPT_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiagnoseFailureRequest {
     #[serde(default)]
     pub exit_code: Option<i32>,
     #[serde(default)]
+    #[schemars(extend("maxLength" = 4096))]
     pub stdout_excerpt: Option<String>,
     #[serde(default)]
+    #[schemars(extend("maxLength" = 4096))]
     pub stderr_excerpt: Option<String>,
     #[serde(default)]
     pub timed_out: bool,
@@ -26,20 +29,25 @@ pub struct DiagnoseFailureRequest {
     #[serde(default)]
     pub desktop_sandbox_signal: bool,
     #[serde(default)]
+    #[schemars(extend("pattern" = "^[0-9A-Fa-f]{64}$"))]
     pub expected_cwd_sha256: Option<String>,
     #[serde(default)]
+    #[schemars(extend("pattern" = "^[0-9A-Fa-f]{64}$"))]
     pub actual_cwd_sha256: Option<String>,
     #[serde(default)]
     pub required_shell: Option<ShellRequirement>,
     #[serde(default)]
     pub observed_shell: Option<ShellObservation>,
     #[serde(default)]
+    #[schemars(extend("pattern" = "^[0-9A-Fa-f]{64}$"))]
     pub resolution_before_sha256: Option<String>,
     #[serde(default)]
+    #[schemars(extend("pattern" = "^[0-9A-Fa-f]{64}$"))]
     pub resolution_after_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ShellRequirement {
     pub family: String,
     #[serde(default)]
@@ -49,6 +57,7 @@ pub struct ShellRequirement {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ShellObservation {
     pub family: String,
     #[serde(default)]

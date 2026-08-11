@@ -8,6 +8,7 @@ This contract defines the bounded structured surface of the local STDIO server. 
 - Transport: local STDIO.
 - Public tools: `inspect_environment`, `diagnose_failure`, `verify_result` only.
 - Tool outputs are structured JSON.
+- Unknown input fields are rejected rather than silently ignored; collection/text/hash bounds are exposed in JSON Schema where practical and are also enforced at runtime.
 - No tool is a generic shell/process runner.
 - No tool mutates profiles, global environment, ACLs, sandbox settings, approvals, registry, services, or unrelated files.
 - Command outcome and task post-condition remain separate facts.
