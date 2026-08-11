@@ -1,12 +1,16 @@
 [package]
-name = "psr-rmcp-native-canary"
-version = "0.0.0-canary"
+name = "powershell-agent-reliability"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 publish = false
 
 [dependencies]
 rmcp = { version = "=3.1.2", default-features = false, features = ["macros", "server", "transport-io"] }
+schemars = "1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [dev-dependencies]
