@@ -1,0 +1,24 @@
+﻿# Build artifacts
+bin/
+obj/
+dist/
+coverage/
+*.log
+*.tmp
+
+# Runtime/local evidence
+.evidence/
+.local/
+results/
+
+# Python fixture runner
+__pycache__/
+*.pyc
+
+# Worktrees
+.worktrees/
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
