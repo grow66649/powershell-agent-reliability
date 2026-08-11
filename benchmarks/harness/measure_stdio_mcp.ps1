@@ -26,6 +26,15 @@ function Read-LineWithTimeout {
     }
     return $task.Result
 }
+function Get-Median {
+    param([double[]]$Values)
+    if (-not $Values -or $Values.Count -eq 0) { return $null }
+    $sorted = @($Values | Sort-Object)
+    $middle = [int][math]::Floor($sorted.Count / 2)
+    if (($sorted.Count % 2) -eq 1) { return [double]$sorted[$middle] }
+    return ([double]$sorted[$middle - 1] + [double]$sorted[$middle]) / 2.0
+}
+
 function Invoke-StdIoProbe {
     param([int]$Trial)
 
@@ -127,8 +136,11 @@ $report = [ordered]@{
     results = $rows
     summary = [ordered]@{
         ready_ms_mean = [math]::Round($ready.Average, 3)
+        ready_ms_median = [math]::Round((Get-Median -Values @($rows.ready_ms)), 3)
         private_mb_mean = [math]::Round($private.Average, 3)
+        private_mb_median = [math]::Round((Get-Median -Values @($rows.private_mb)), 3)
         working_set_mb_mean = [math]::Round($workingSet.Average, 3)
+        working_set_mb_median = [math]::Round((Get-Median -Values @($rows.working_set_mb)), 3)
         all_cleanup = -not ($rows.cleanup_pass -contains $false)
         no_forced_cleanup = -not ($rows.forced_cleanup -contains $true)
     }

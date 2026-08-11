@@ -41,6 +41,7 @@ The repository intentionally does not install or mutate Codex configuration auto
 
 - `benchmarks/harness/run_baseline.py`: reproduces the sanitized synthetic failure fixtures.
 - `benchmarks/harness/measure_stdio_mcp.ps1`: measures local STDIO initialize/list readiness, idle process memory, and owned-process cleanup.
+- `benchmarks/harness/snapshot_mcp_processes.ps1`: takes a read-only exact-executable process/memory snapshot for Desktop lifecycle observation.
 - `benchmarks/harness/score_ab.py`: scores user-supplied A/B JSONL run records while preserving missing metrics as missing.
 
 Synthetic/local evidence proves components only. Product admission still requires repeated representative Windows Codex Desktop A/B trials under `docs/contracts/benchmark-contract.md`.
