@@ -6,8 +6,26 @@ from collections import defaultdict
 
 REQUIRED_FIELDS = ("case_id", "trial_id", "path", "eligible_failure")
 PATHS = {"A", "B"}
-
-
+FAILURE_CLASSES = {
+    "QUOTING_EXPANSION",
+    "CWD_PATH_IDENTITY",
+    "SHELL_VERSION_MISMATCH",
+    "NATIVE_PROCESS_OUTCOME",
+    "TIMEOUT_CANCELLATION",
+    "POST_CONDITION_MISMATCH",
+    "ENVIRONMENT_STALENESS",
+    "DESKTOP_SANDBOX_BOUNDARY",
+    "UNKNOWN",
+}
+NONNEGATIVE_METRICS = (
+    "repair_turns",
+    "wrong_repairs",
+    "wall_ms",
+    "tool_calls",
+    "intervention_count",
+    "mcp_startup_ms",
+    "mcp_idle_mb",
+)
 def load_jsonl(path: pathlib.Path) -> list[dict]:
     rows = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
@@ -17,6 +35,8 @@ def load_jsonl(path: pathlib.Path) -> list[dict]:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid JSON on line {line_number}: {exc}") from exc
+        if not isinstance(row, dict):
+            raise ValueError(f"line {line_number} must contain a JSON object")
         rows.append(row)
     return rows
 
@@ -31,16 +51,26 @@ def _values(rows: list[dict], key: str, expected_type=None) -> list:
             raise ValueError(f"{key} has invalid type in {row.get('case_id', '<unknown>')}")
         values.append(value)
     return values
+
+
 def _rate(values: list[bool]) -> float | None:
     if not values:
         return None
     return sum(1 for value in values if value) / len(values)
-
-
 def _median(values: list[float | int]) -> float | None:
     if not values:
         return None
     return float(statistics.median(values))
+
+
+def _confusion_matrix(rows: list[dict]) -> dict:
+    matrix: dict[str, dict[str, int]] = {}
+    for row in rows:
+        expected = row["expected_class"]
+        predicted = row["predicted_class"]
+        bucket = matrix.setdefault(expected, {})
+        bucket[predicted] = bucket.get(predicted, 0) + 1
+    return matrix
 
 
 def _validate_row(row: dict) -> None:
@@ -54,21 +84,30 @@ def _validate_row(row: dict) -> None:
     for key in ("case_id", "trial_id"):
         if not isinstance(row[key], str) or not row[key]:
             raise ValueError(f"{key} must be a non-empty string")
-    for key in (
-        "repair_turns",
-        "wrong_repairs",
-        "wall_ms",
-        "tool_calls",
-        "intervention_count",
-        "mcp_startup_ms",
-        "mcp_idle_mb",
-    ):
+    for key in NONNEGATIVE_METRICS:
         value = row.get(key)
-        if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0):
+        if value is not None and (
+            not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0
+        ):
             raise ValueError(f"{key} must be a non-negative number when present")
 
+    for key in ("expected_class", "predicted_class"):
+        value = row.get(key)
+        if value is not None and value not in FAILURE_CLASSES:
+            raise ValueError(f"{key} has unsupported failure class {value!r}")
 
-def _score_path(rows: list[dict]) -> dict:
+    for key in (
+        "completion",
+        "first_action_correct",
+        "post_condition_correct",
+        "false_completion",
+    ):
+        value = row.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"{key} must be boolean when present")
+
+
+def _score_metrics(rows: list[dict]) -> dict:
     completion = _values(rows, "completion", bool)
     false_completion = _values(rows, "false_completion", bool)
     post_condition_correct = _values(rows, "post_condition_correct", bool)
@@ -91,26 +130,24 @@ def _score_path(rows: list[dict]) -> dict:
         else None
     )
     unknown_rate = (
-        sum(row.get("predicted_class") == "UNKNOWN" for row in classified) / len(classified)
+        sum(row["predicted_class"] == "UNKNOWN" for row in classified) / len(classified)
         if classified
         else None
     )
 
     controls = [row for row in rows if row["eligible_failure"] is False]
     control_interventions = [
-        row.get("intervention_count") > 0
+        row["intervention_count"] > 0
         for row in controls
         if isinstance(row.get("intervention_count"), (int, float))
     ]
-
     return {
         "run_count": len(rows),
-        "eligible_failure_count": sum(row["eligible_failure"] for row in rows),
-        "control_count": len(controls),
         "completion_rate": _rate(completion),
         "median_repair_turns": _median(repair_turns),
         "median_wrong_repairs": _median(wrong_repairs),
         "classification_accuracy": classification_accuracy,
+        "confusion_matrix": _confusion_matrix(classified),
         "unknown_rate": unknown_rate,
         "first_action_correct_rate": _rate(first_action_correct),
         "false_completion_rate": _rate(false_completion),
@@ -123,9 +160,35 @@ def _score_path(rows: list[dict]) -> dict:
     }
 
 
+def _score_path(rows: list[dict]) -> dict:
+    eligible = [row for row in rows if row["eligible_failure"]]
+    controls = [row for row in rows if not row["eligible_failure"]]
+    metrics = _score_metrics(rows)
+    metrics.update(
+        {
+            "eligible_failure_count": len(eligible),
+            "control_count": len(controls),
+            "eligible": _score_metrics(eligible),
+            "controls": _score_metrics(controls),
+        }
+    )
+    return metrics
+def _pairing_summary(rows: list[dict]) -> dict:
+    pairs: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in rows:
+        pairs[(row["case_id"], row["trial_id"])].add(row["path"])
+    paired = sum(paths == {"A", "B"} for paths in pairs.values())
+    return {
+        "case_trial_count": len(pairs),
+        "paired_a_b_count": paired,
+        "unpaired_count": len(pairs) - paired,
+    }
+
+
 def score_rows(rows: list[dict]) -> dict:
     if not rows:
         raise ValueError("at least one benchmark row is required")
+
     seen = set()
     for row in rows:
         _validate_row(row)
@@ -142,6 +205,7 @@ def score_rows(rows: list[dict]) -> dict:
     return {
         "schema_version": 1,
         "row_count": len(rows),
+        "pairing": _pairing_summary(rows),
         "paths": paths,
         "guardrails": {
             "known_good_zero_intervention": _zero_intervention_guardrail(paths),
@@ -153,7 +217,7 @@ def _zero_intervention_guardrail(paths: dict[str, dict]) -> bool | None:
     path_b = paths.get("B")
     if not path_b:
         return None
-    rate = path_b.get("control_false_intervention_rate")
+    rate = path_b["controls"].get("control_false_intervention_rate")
     if rate is None:
         return None
     return rate == 0.0

@@ -109,3 +109,32 @@ class ScoreAbValidationTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             score_ab.score_rows([row, dict(row)])
+
+class ScoreAbContractTests(unittest.TestCase):
+    def test_reports_eligible_and_control_metrics_separately_with_confusion_matrix(self):
+        rows = [
+            {
+                "case_id": "failure",
+                "trial_id": "1",
+                "path": "A",
+                "eligible_failure": True,
+                "completion": False,
+                "expected_class": "CWD_PATH_IDENTITY",
+                "predicted_class": "UNKNOWN",
+            },
+            {
+                "case_id": "control",
+                "trial_id": "1",
+                "path": "A",
+                "eligible_failure": False,
+                "completion": True,
+                "intervention_count": 0,
+            },
+        ]
+        path_a = score_ab.score_rows(rows)["paths"]["A"]
+        self.assertEqual(path_a["eligible"]["completion_rate"], 0.0)
+        self.assertEqual(path_a["controls"]["completion_rate"], 1.0)
+        self.assertEqual(
+            path_a["eligible"]["confusion_matrix"],
+            {"CWD_PATH_IDENTITY": {"UNKNOWN": 1}},
+        )
