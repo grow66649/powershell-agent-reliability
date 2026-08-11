@@ -101,8 +101,8 @@ pub fn diagnose_failure(request: DiagnoseFailureRequest) -> Result<DiagnosisResu
         ));
     }
 
-    if let Some(post_condition) = request.post_condition {
-        let command_succeeded = request.exit_code == Some(0);
+    if let (Some(exit_code), Some(post_condition)) = (request.exit_code, request.post_condition) {
+        let command_succeeded = exit_code == 0;
         if command_succeeded != post_condition {
             return Ok(result(
                 "POST_CONDITION_MISMATCH",

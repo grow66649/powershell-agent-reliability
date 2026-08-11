@@ -93,3 +93,12 @@ fn ambiguous_evidence_stays_unknown() {
     assert_eq!(diagnosis.failure_class, "UNKNOWN");
     assert_eq!(diagnosis.confidence, "low");
 }
+#[test]
+fn post_condition_without_command_exit_does_not_invent_command_failure() {
+    let diagnosis = diagnose_failure(DiagnoseFailureRequest {
+        post_condition: Some(true),
+        ..base()
+    })
+    .expect("diagnosis without exit code");
+    assert_eq!(diagnosis.failure_class, "UNKNOWN");
+}
