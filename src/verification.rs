@@ -28,6 +28,7 @@ pub struct VerifyResultRequest {
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[schemars(inline)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationMode {
     #[default]
@@ -35,6 +36,7 @@ pub enum VerificationMode {
     Any,
 }
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(inline)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VerificationCheck {
     FileExists {

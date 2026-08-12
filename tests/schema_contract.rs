@@ -32,13 +32,51 @@ fn tool_input_schema_exposes_collection_bounds() {
     assert_eq!(verification["properties"]["checks"]["maxItems"], 32);
     assert_eq!(verification["properties"]["cwd"]["maxLength"], 32768);
     assert_eq!(
-        verification["$defs"]["VerificationCheck"]["oneOf"][0]["properties"]["path"]["maxLength"],
+        verification["properties"]["checks"]["items"]["oneOf"][0]["properties"]["path"]["maxLength"],
         32768
     );
     assert_eq!(
-        verification["$defs"]["VerificationCheck"]["oneOf"][3]["properties"]["expected_sha256"]["pattern"],
+        verification["properties"]["checks"]["items"]["oneOf"][3]["properties"]["expected_sha256"]["pattern"],
         "^[0-9A-Fa-f]{64}$"
     );
+}
+#[test]
+fn tool_input_schema_inlines_nested_agent_arguments() {
+    use rmcp::handler::server::tool::schema_for_input;
+
+    let diagnosis = serde_json::Value::Object(
+        schema_for_input::<DiagnoseFailureRequest>()
+            .expect("diagnosis input schema")
+            .as_ref()
+            .clone(),
+    );
+    let observed_shell = &diagnosis["properties"]["observed_shell"];
+    assert!(!observed_shell.to_string().contains("\"$ref\""));
+    assert_eq!(observed_shell["type"], serde_json::json!(["object", "null"]));
+    assert_eq!(observed_shell["properties"]["family"]["type"], "string");
+
+    let verification = serde_json::Value::Object(
+        schema_for_input::<VerifyResultRequest>()
+            .expect("verification input schema")
+            .as_ref()
+            .clone(),
+    );
+    assert_eq!(verification["properties"]["mode"]["enum"], serde_json::json!(["all", "any"]));
+    let check_items = &verification["properties"]["checks"]["items"];
+    assert!(!check_items.to_string().contains("\"$ref\""));
+    assert_eq!(check_items["oneOf"][0]["properties"]["kind"]["const"], "file_exists");
+    assert_eq!(
+        check_items["oneOf"][3]["properties"]["expected_sha256"]["type"],
+        "string"
+    );
+}
+
+#[test]
+fn skill_reference_documents_exact_nested_tool_shapes() {
+    let reference = include_str!("../skills/powershell-reliability/references/tool-usage.md");
+    assert!(reference.contains("\"observed_shell\": {\"family\": \"PowerShell\", \"major\": 7, \"minor\": 6}"));
+    assert!(reference.contains("{\"kind\": \"file_sha256\", \"path\": \"output.txt\", \"expected_sha256\":"));
+    assert!(reference.contains("{\"kind\": \"file_size\", \"path\": \"output.txt\", \"min_bytes\": 5, \"max_bytes\": 5}"));
 }
 #[test]
 fn tool_input_schema_rejects_unknown_fields() {

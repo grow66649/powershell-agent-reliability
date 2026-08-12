@@ -47,6 +47,7 @@ pub struct DiagnoseFailureRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct ShellRequirement {
     pub family: String,
@@ -57,6 +58,7 @@ pub struct ShellRequirement {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct ShellObservation {
     pub family: String,

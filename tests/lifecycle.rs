@@ -39,6 +39,41 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
     names.sort();
     assert_eq!(names, ["diagnose_failure", "inspect_environment", "verify_result"]);
 
+    let diagnose_tool = tools
+        .iter()
+        .find(|tool| tool.name == "diagnose_failure")
+        .context("diagnose tool")?;
+    let diagnose_schema = serde_json::Value::Object(diagnose_tool.input_schema.as_ref().clone());
+    assert!(
+        !diagnose_schema["properties"]["observed_shell"]
+            .to_string()
+            .contains("\"$ref\"")
+    );
+    assert_eq!(
+        diagnose_schema["properties"]["observed_shell"]["properties"]["family"]["type"],
+        "string"
+    );
+
+    let verify_tool = tools
+        .iter()
+        .find(|tool| tool.name == "verify_result")
+        .context("verify tool")?;
+    let verify_schema = serde_json::Value::Object(verify_tool.input_schema.as_ref().clone());
+    assert_eq!(
+        verify_schema["properties"]["mode"]["enum"],
+        json!(["all", "any"])
+    );
+    assert!(
+        !verify_schema["properties"]["checks"]["items"]
+            .to_string()
+            .contains("\"$ref\"")
+    );
+    assert_eq!(
+        verify_schema["properties"]["checks"]["items"]["oneOf"][3]["properties"]
+            ["expected_sha256"]["type"],
+        "string"
+    );
+
     let inspect_arguments = serde_json::from_value(json!({
         "critical_executables": [],
         "task_env_delta": {}
