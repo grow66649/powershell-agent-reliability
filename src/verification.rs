@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 const MAX_CHECKS: usize = 32;
 const MAX_PATH_BYTES: usize = 32_768;
+const MAX_FILE_HASH_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -389,13 +390,29 @@ fn hash_path(path: &Path) -> String {
     sha256_hex(normalized.as_bytes())
 }
 fn hash_file(path: &Path) -> std::io::Result<String> {
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
+    if file.metadata()?.len() > MAX_FILE_HASH_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            "file exceeds 64 MiB SHA-256 limit",
+        ));
+    }
+
+    let mut file = file.take(MAX_FILE_HASH_BYTES + 1);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut total_read = 0_u64;
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
+        }
+        total_read += read as u64;
+        if total_read > MAX_FILE_HASH_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "file exceeds 64 MiB SHA-256 limit",
+            ));
         }
         hasher.update(&buffer[..read]);
     }

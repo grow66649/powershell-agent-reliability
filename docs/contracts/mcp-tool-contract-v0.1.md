@@ -69,7 +69,7 @@ Supported check kinds:
 - `file_exists`
 - `file_absent`
 - `directory_exists`
-- `file_sha256`
+- `file_sha256` (files up to 64 MiB; larger files return an error check with `FileTooLarge`)
 - `file_size` with optional minimum/maximum byte bounds.
 
 Outputs include `command_succeeded` (when an exit code was supplied), independent `task_succeeded`, and one result per check. Raw paths are not echoed; check results carry only a path SHA-256 plus bounded metadata/hash facts.

@@ -139,3 +139,31 @@ fn any_mode_succeeds_when_one_explicit_check_passes() {
     assert_eq!(result.checks.iter().filter(|check| check.passed).count(), 1);
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn file_sha256_rejects_files_larger_than_64_mib() {
+    let root = fixture_root();
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create fixture root");
+    let artifact = root.join("too-large.bin");
+    let file = fs::File::create(&artifact).expect("create oversized fixture");
+    file.set_len(64 * 1024 * 1024 + 1)
+        .expect("size oversized fixture");
+
+    let result = verify_result(VerifyResultRequest {
+        command_exit_code: None,
+        cwd: Some(root.display().to_string()),
+        mode: VerificationMode::All,
+        checks: vec![VerificationCheck::FileSha256 {
+            path: "too-large.bin".to_owned(),
+            expected_sha256: "0".repeat(64),
+        }],
+    })
+    .expect("oversized hash request should return a bounded check result");
+
+    assert!(!result.task_succeeded);
+    assert_eq!(result.checks[0].status, "error");
+    assert_eq!(result.checks[0].error_kind.as_deref(), Some("FileTooLarge"));
+    assert!(result.checks[0].observed_sha256.is_none());
+    let _ = fs::remove_dir_all(&root);
+}
