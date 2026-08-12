@@ -4,6 +4,14 @@
 
 Use only after a relevant failure. Inputs are optional `shell_executable`, optional `cwd`, up to 16 `critical_executables`, and up to 32 task-supplied `task_env_delta` entries. The output exposes hashes/identity rather than raw cwd/PATH values.
 
+## Failure-only call discipline
+
+Freeze the task post-condition before diagnosis or repair. Expected hashes, sizes, or other target values must come from the user/task or be derived from the declared target before observing repaired candidate output.
+
+Keep helper failures separate: probe/helper errors are not evidence about the original task failure unless that probe is itself the task boundary. Call diagnose_failure once per failure boundary; repeat only after `UNKNOWN` with newly collected missing facts or after a genuinely new failure boundary.
+
+Perform at most one repair. If that repair fails the frozen post-condition, stop and report failure; do not perform a second repair in the same Reliability intervention. Call `verify_result` once after repair against the frozen post-condition. Never weaken checks after a failed verification. Never use observed candidate output as the expected verification value.
+
 ## `diagnose_failure`
 
 Supply observed facts such as `exit_code`, `timed_out`, `post_condition`, `native_process`, bounded stdout/stderr excerpts, explicit nested-command/literal-dollar facts, cwd hashes, shell requirement/observation, resolution-before/after hashes, or an explicit Desktop sandbox signal. Do not infer a hash change unless it was actually observed.

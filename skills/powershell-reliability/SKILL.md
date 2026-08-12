@@ -10,12 +10,12 @@ Keep Codex Desktop/app-server as the command and process owner. Use the MCP only
 ## Failure-only workflow
 
 1. Leave the first execution attempt unchanged. If the command outcome and required post-condition both pass, do not call this MCP.
-2. After an eligible failure, preserve the original exit code, timeout state, stdout/stderr facts, and post-condition truth separately.
-3. Call `inspect_environment` only when shell identity, cwd, PATH resolution, or a task-declared critical executable may matter. Supply only the shell/cwd/executable names tied to the failure. Never request or reconstruct a full environment dump.
-4. Call `diagnose_failure` with bounded structured facts. Keep stdout/stderr excerpts minimal; prefer explicit boolean/hash facts over large logs.
-5. Treat the returned class as evidence, not permission to bypass safety. If it returns `UNKNOWN`, collect only the missing facts tied to the failed boundary and diagnose again rather than guessing.
-6. Perform at most one evidence-backed repair step through Codex Desktop's normal tools. Do not turn the MCP into a command runner.
-7. Call `verify_result` with explicit deterministic post-conditions before declaring completion. Report command success and task success independently when they differ.
+2. After an eligible failure, preserve the original exit code, timeout state, stdout/stderr facts, and post-condition truth separately. Freeze the task post-condition before diagnosis or repair. Expected hashes, sizes, or other target values must come from the user/task or be derived from the declared target before observing repaired candidate output.
+3. Keep probe/helper failures separate: probe/helper errors are not evidence about the original task failure unless that probe is itself the task boundary. Call `inspect_environment` only when shell identity, cwd, PATH resolution, or a task-declared critical executable may matter.
+4. Call diagnose_failure once per failure boundary with bounded structured facts. Call it again only after `UNKNOWN` with newly collected missing facts, or after a genuinely new failure boundary.
+5. Treat the returned class as evidence, not permission to bypass safety. Do not add unrelated probes after a high-confidence diagnosis.
+6. Perform at most one evidence-backed repair step through Codex Desktop's normal tools. If that repair fails the frozen post-condition, stop and report failure; do not perform a second repair in the same Reliability intervention.
+7. Call `verify_result` once after repair against the frozen deterministic post-condition before declaring completion. Never weaken checks after a failed verification. Never use observed candidate output as the expected verification value. Report command success and task success independently when they differ.
 
 ## Repair rules
 
