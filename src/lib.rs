@@ -15,17 +15,27 @@ use verification::{VerificationResult, VerifyResultRequest, verify_result};
 #[derive(Debug, Clone, Default)]
 pub struct PsrServer;
 
+async fn run_blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| "blocking worker failed".to_owned())?
+}
+
 #[tool_router]
 impl PsrServer {
     #[tool(
         name = "inspect_environment",
         description = "Return privacy-bounded shell/cwd/PATH/executable identity for a failed Windows task."
     )]
-    fn inspect_environment(
+    async fn inspect_environment(
         &self,
         Parameters(request): Parameters<InspectEnvironmentRequest>,
     ) -> Result<Json<EnvironmentDigest>, String> {
-        inspect_environment(request).map(Json)
+        run_blocking(move || inspect_environment(request)).await.map(Json)
     }
     #[tool(
         name = "diagnose_failure",
@@ -42,11 +52,11 @@ impl PsrServer {
         name = "verify_result",
         description = "Evaluate explicit deterministic post-conditions independently from command exit status."
     )]
-    fn verify_result(
+    async fn verify_result(
         &self,
         Parameters(request): Parameters<VerifyResultRequest>,
     ) -> Result<Json<VerificationResult>, String> {
-        verify_result(request).map(Json)
+        run_blocking(move || verify_result(request)).await.map(Json)
     }
 }
 
