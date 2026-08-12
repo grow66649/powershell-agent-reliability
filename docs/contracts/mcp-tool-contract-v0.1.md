@@ -14,6 +14,14 @@ This contract defines the bounded structured surface of the local STDIO server. 
 - Command outcome and task post-condition remain separate facts.
 - Missing evidence stays missing; `UNKNOWN` is valid.
 
+### Same-process concurrency
+
+- One STDIO server process may have multiple in-flight `tools/call` requests.
+- Request IDs/results must remain correctly paired; concurrent requests must not share mutable request state.
+- Failure or invalid input in one request must not corrupt, cancel, or change another request's result.
+- Bounded file hashing/metadata work in `inspect_environment` or `verify_result` must not starve an unrelated `diagnose_failure` request.
+- Concurrency does not authorize a session manager, daemon, global queue/cache, generic worker pool, or a wider public tool surface.
+
 ## `inspect_environment`
 
 Use after a failure when shell/cwd/executable-resolution identity matters.
