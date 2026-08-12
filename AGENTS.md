@@ -1,13 +1,21 @@
-﻿# AGENTS.md
+# AGENTS.md
 
 ## Scope
 
 This repository contains the product-facing contracts, sanitized benchmarks, tests, and implementation for PowerShell Agent Reliability. Live project state belongs in the canonical task, not here.
 
+## Development control plane
+
+- Development is orchestrated from the ChatGPT Business web Project, which directly invokes Gateway MCP and RDC MCP.
+- Gateway MCP owns canonical-task governance/CAS/receipts and governed development inspection/policy.
+- RDC MCP owns ordinary Windows filesystem, workspace, shell, process, Git, build, test, log, and post-condition work.
+- Windows Codex Desktop is the product target runtime and real acceptance surface only; it is not this project's development control plane.
+- Standalone Codex CLI is not the development control plane and is only secondary compatibility evidence.
+
 ## Core product boundary
 
 - Target runtime: Windows Codex Desktop.
-- Codex Desktop/app-server remains the command/process owner.
+- In the product runtime, Codex Desktop/app-server remains the command/process owner.
 - Do not build a second generic shell executor, terminal, sandbox, or process manager unless a benchmark-approved gap proves it necessary.
 - Product value is failure diagnosis, minimal environment identity, post-condition verification, and failure-only recovery guidance.
 
@@ -38,8 +46,8 @@ This repository contains the product-facing contracts, sanitized benchmarks, tes
 
 ## Development tools
 
-- Ordinary Windows filesystem, shell, process, build, test, and log work belongs to RDC in the controlling ChatGPT project.
-- Gateway owns canonical-task governance and optional development inspection/policy routing; do not wrap ordinary host work through Gateway merely for uniformity.
+- ChatGPT Business web is the controlling development surface; it calls Gateway and RDC according to the ownership split above.
+- Do not route ordinary RDC-native host work through Gateway merely for uniformity.
 - CodeGraph/Serena are advisory for symbol/reference/blast-radius inspection and must operate on the exact current worktree/index.
 - Ponytail/reuse-YAGNI policy may be pulled before nontrivial implementation slices; it never overrides validation, security, recovery, or required compatibility.
 
