@@ -304,6 +304,7 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
         "valid": not invalid_reasons,
         "invalid_reasons": invalid_reasons,
     }
+    record.update(_cost_fields(rows, boundary, skill_calls, mcp_calls))
     return record
 
 
@@ -339,3 +340,104 @@ def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[
         seen.add(identity)
         records.append(extract_trial(rows, path, manifest_row))
     return sorted(records, key=lambda row: row.get("sequence") or 0)
+
+
+def _validated_token_usage(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    result = {}
+    for field in TOKEN_FIELDS:
+        item = value.get(field)
+        if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+            return None
+        result[field] = item
+    return result
+
+
+def _token_snapshots(rows: list[dict]) -> list[tuple[int, dict]]:
+    snapshots = []
+    for index, row in enumerate(rows):
+        if row.get("type") != "event_msg":
+            continue
+        payload = row.get("payload") or {}
+        if payload.get("type") != "token_count":
+            continue
+        info = payload.get("info") or {}
+        usage = _validated_token_usage(info.get("total_token_usage"))
+        if usage is not None:
+            snapshots.append((index, usage))
+    return snapshots
+
+
+def final_token_usage(rows: list[dict]) -> dict | None:
+    token_rows = []
+    for row in rows:
+        if row.get("type") == "event_msg" and (row.get("payload") or {}).get("type") == "token_count":
+            token_rows.append(row)
+    if not token_rows:
+        return None
+    payload = token_rows[-1].get("payload") or {}
+    info = payload.get("info") or {}
+    return _validated_token_usage(info.get("total_token_usage"))
+
+
+def phase_token_delta(rows: list[dict], start_index: int | None, end_index: int | None) -> dict | None:
+    if start_index is None or end_index is None or end_index < start_index:
+        return None
+    snapshots = _token_snapshots(rows)
+    before = [item for item in snapshots if item[0] <= start_index]
+    after = [item for item in snapshots if item[0] >= end_index]
+    if not before or not after:
+        return None
+    start_usage = before[-1][1]
+    end_usage = after[0][1]
+    if any(end_usage[field] < start_usage[field] for field in TOKEN_FIELDS):
+        return None
+    return {field: end_usage[field] - start_usage[field] for field in TOKEN_FIELDS}
+
+
+def timestamp_delta_ms(start_value: str | None, end_value: str | None) -> float | None:
+    if not start_value or not end_value:
+        return None
+    try:
+        start = datetime.datetime.fromisoformat(start_value.replace("Z", "+00:00"))
+        end = datetime.datetime.fromisoformat(end_value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    delta = (end - start).total_seconds() * 1000.0
+    return delta if delta >= 0 else None
+
+
+def _first_after(calls: list[dict], boundary_index: int | None) -> dict | None:
+    if boundary_index is None:
+        return None
+    for call in calls:
+        if call["index"] > boundary_index:
+            return call
+    return None
+
+
+def _cost_fields(rows: list[dict], boundary: dict | None, skill_calls: list[dict], mcp_calls: list[dict]) -> dict:
+    boundary_index = boundary.get("index") if boundary else None
+    boundary_timestamp = boundary.get("timestamp") if boundary else None
+    first_skill = _first_after(skill_calls, boundary_index)
+    first_mcp = _first_after(mcp_calls, boundary_index)
+    turn_start = rows[0].get("timestamp") if rows else None
+    turn_end = rows[-1].get("timestamp") if rows else None
+    values = {
+        "token_usage": final_token_usage(rows),
+        "turn_duration_ms": timestamp_delta_ms(turn_start, turn_end),
+        "boundary_to_skill_ms": timestamp_delta_ms(boundary_timestamp, first_skill.get("timestamp") if first_skill else None),
+        "boundary_to_mcp_ms": timestamp_delta_ms(boundary_timestamp, first_mcp.get("timestamp") if first_mcp else None),
+        "phase_token_deltas": {
+            "pre_boundary": phase_token_delta(rows, 0, boundary_index),
+            "boundary_to_skill": phase_token_delta(rows, boundary_index, first_skill.get("index") if first_skill else None),
+            "boundary_to_mcp": phase_token_delta(rows, boundary_index, first_mcp.get("index") if first_mcp else None),
+        },
+    }
+    missing = []
+    for key in ("token_usage", "turn_duration_ms", "boundary_to_skill_ms", "boundary_to_mcp_ms"):
+        if values[key] is None:
+            missing.append(key)
+    values["missing_measurements"] = missing
+    return values

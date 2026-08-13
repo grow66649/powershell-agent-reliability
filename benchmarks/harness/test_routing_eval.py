@@ -287,3 +287,67 @@ class RoutingEvalCollectionTests(unittest.TestCase):
             routing_eval.trigger_eval.write_jsonl(root / "rollout-b.jsonl", rows)
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 routing_eval.collect_rollouts(root, manifest)
+
+
+def _token_row(total, timestamp="2026-08-14T00:00:00Z", **overrides):
+    usage = {
+        "input_tokens": total - 5,
+        "cached_input_tokens": 1,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3,
+        "reasoning_output_tokens": 1,
+        "total_tokens": total,
+    }
+    usage.update(overrides)
+    return _row(
+        "event_msg",
+        {"type": "token_count", "info": {"total_token_usage": usage}},
+        timestamp,
+    )
+
+
+class RoutingEvalCostTests(unittest.TestCase):
+    def test_final_token_usage_records_all_components(self):
+        rows = [_token_row(10), _token_row(20, "2026-08-14T00:00:01Z", input_tokens=12)]
+        usage = routing_eval.final_token_usage(rows)
+        self.assertEqual(usage["total_tokens"], 20)
+        self.assertEqual(usage["input_tokens"], 12)
+        self.assertEqual(set(usage), set(routing_eval.TOKEN_FIELDS))
+
+    def test_missing_or_invalid_token_usage_remains_none(self):
+        self.assertIsNone(routing_eval.final_token_usage([]))
+        self.assertIsNone(routing_eval.final_token_usage([_token_row(10, input_tokens=-1)]))
+
+    def test_extract_trial_adds_rollout_latency_metrics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("R09-T01", "S", workspace)
+            rows = _base_rollout("R09-T01", workspace) + _failed_command_rows() + [_skill_row(), _mcp_row()]
+            rows.append(_token_row(40, "2026-08-14T00:00:05Z"))
+            record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
+        self.assertEqual(record["turn_duration_ms"], 5000.0)
+        self.assertEqual(record["boundary_to_skill_ms"], 1000.0)
+        self.assertEqual(record["boundary_to_mcp_ms"], 2000.0)
+        self.assertEqual(record["token_usage"]["total_tokens"], 40)
+
+    def test_missing_latency_endpoint_stays_none(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("R10-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})
+            rows = _base_rollout("R10-T01", workspace, skill_visible=False)
+            record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
+        self.assertIsNone(record["boundary_to_mcp_ms"])
+        self.assertIsNone(record["boundary_to_skill_ms"])
+        self.assertIsNone(record["token_usage"])
+
+    def test_phase_delta_requires_monotonic_bracketing_snapshots(self):
+        monotonic = [_token_row(10), _token_row(20, "2026-08-14T00:00:01Z")]
+        delta = routing_eval.phase_token_delta(monotonic, 0, 1)
+        self.assertEqual(delta["total_tokens"], 10)
+        non_monotonic = [_token_row(20), _token_row(10, "2026-08-14T00:00:01Z")]
+        self.assertIsNone(routing_eval.phase_token_delta(non_monotonic, 0, 1))
+
+    def test_negative_timestamp_delta_stays_none(self):
+        self.assertIsNone(
+            routing_eval.timestamp_delta_ms("2026-08-14T00:00:02Z", "2026-08-14T00:00:01Z")
+        )
