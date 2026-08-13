@@ -28,10 +28,17 @@ Do not activate solely because:
 
 Component-routing failures must be classified at their actual boundary before PowerShell reliability is considered.
 
+## Routing after activation
+
+- A pure command/post-condition disagreement goes directly to `diagnose_failure`; environment inspection is not a default intermediate step.
+- `inspect_environment` is used only when shell, cwd, PATH resolution, or task-declared executable identity can causally matter to the observed failure.
+- A high-confidence diagnosis does not justify unrelated exploratory probes.
+- `UNKNOWN` permits collection of only the explicitly missing bounded fact before at most one re-diagnosis.
+
 ## Success-path invariant
 
 If the first attempt returns its expected command outcome and the required observable post-condition passes, `AUTO_ON_FAILURE` records zero intervention. Any measurable overhead on such controls counts against the candidate.
 
 ## Repair boundary
 
-The first prototype may classify and build a structured retry plan only from evidence tied to the failed boundary. It must not silently rewrite arbitrary user commands, alter global profiles/configuration, install dependencies, or broaden permissions.
+Reliability may guide at most one evidence-backed repair from facts tied to the failed boundary. Freeze deterministic task criteria before repair and perform exactly one final `verify_result` after repair. Never weaken criteria or derive expected values from repaired candidate output. Reliability must not silently rewrite arbitrary user commands, alter global profiles/configuration, install dependencies, or broaden permissions.
