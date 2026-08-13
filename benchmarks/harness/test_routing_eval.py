@@ -360,6 +360,14 @@ def _score_record(case_id="R20", trial_id="T01", arm="S", group="should_trigger"
         "arm": arm,
         "group": group,
         "lane": lane,
+        "prompt_sha256": "A" * 64,
+        "fixture_sha256": "B" * 64,
+        "model": "gpt-test",
+        "effort": "high",
+        "approval_policy": "never",
+        "sandbox_type": "workspace-write",
+        "cli_version": "desktop-test",
+        "originator": "Codex Desktop",
         "valid": True,
         "invalid_reasons": [],
         "mcp_intervention_count": 0,
@@ -590,6 +598,180 @@ class RoutingEvalRepositoryContractTests(unittest.TestCase):
             "missing measurements remain missing",
             "M setup is BLOCKED rather than simulated",
             "raw rollout evidence stays host-local",
+            "pair identity drift invalidates both arms",
+            "post_condition_passed",
+            "tool_output_marker",
+            "assistant prose is never post-condition evidence",
+            "wrong_repair review coverage",
         ]
         for phrase in required:
             self.assertIn(phrase, combined)
+
+
+class RoutingEvalReviewPairConsistencyTests(unittest.TestCase):
+    def _paired_records(self, group="should_trigger"):
+        identity = {
+            "prompt_sha256": "A" * 64,
+            "fixture_sha256": "B" * 64,
+            "model": "gpt-test",
+            "effort": "high",
+            "approval_policy": "never",
+            "sandbox_type": "workspace-write",
+            "cli_version": "desktop-test",
+            "originator": "Codex Desktop",
+        }
+        s = _score_record("I01", arm="S", group=group, mcp_intervention_count=1, **identity)
+        m = _score_record("I01", arm="M", group=group, mcp_intervention_count=1, **identity)
+        return s, m
+
+    def test_pair_identity_drift_invalidates_both_arms(self):
+        for field in routing_eval.PAIR_CONSISTENCY_FIELDS:
+            with self.subTest(field=field):
+                s, m = self._paired_records()
+                m[field] = f"drift-{field}"
+                report = routing_eval.score_records([s, m])
+                for arm in ("S", "M"):
+                    self.assertEqual(report["arms"][arm]["valid_trial_count"], 0)
+                    self.assertEqual(report["arms"][arm]["invalid_trial_count"], 1)
+                    self.assertIn(f"pair_identity_drift:{field}", report["arms"][arm]["invalid_reasons"])
+                    self.assertIsNone(report["arms"][arm]["lanes"]["admission"]["mcp_intervention_recall"])
+
+    def test_pair_identity_missing_field_is_invalid_evidence(self):
+        s, m = self._paired_records()
+        m["cli_version"] = None
+        report = routing_eval.score_records([s, m])
+        for arm in ("S", "M"):
+            self.assertEqual(report["arms"][arm]["valid_trial_count"], 0)
+            self.assertIn("pair_identity_missing:cli_version", report["arms"][arm]["invalid_reasons"])
+
+    def test_pair_drift_is_excluded_from_idle_token_denominator(self):
+        s, m = self._paired_records(group="should_not_trigger")
+        s["token_usage"] = {"total_tokens": 1010}
+        m["token_usage"] = {"total_tokens": 1000}
+        m["sandbox_type"] = "different-sandbox"
+        paired = routing_eval.score_records([s, m])["paired_idle_token"]
+        self.assertEqual(paired["eligible_pair_count"], 0)
+        self.assertEqual(paired["scorable_pair_count"], 0)
+        self.assertIsNone(paired["coverage"])
+        self.assertEqual(paired["gate_state"], "UNRESOLVED")
+
+
+class RoutingEvalReviewPostConditionTests(unittest.TestCase):
+    def _post_condition(self):
+        return {
+            "kind": "tool_output_marker",
+            "pass_marker": "POST-CONDITION: PASS",
+            "fail_marker": "POST-CONDITION: FAIL",
+        }
+
+    def test_prepare_freezes_declared_post_condition_rule(self):
+        case = _case("P01", lane="validation")
+        case["post_condition"] = self._post_condition()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["post_condition"], self._post_condition())
+        self.assertEqual(rows[0]["post_condition"], rows[1]["post_condition"])
+
+    def test_extract_trial_uses_latest_declared_tool_marker_separate_from_command_exit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("P02-T01", "M", workspace)
+            manifest["post_condition"] = self._post_condition()
+            rows = _base_rollout("P02-T01", workspace, skill_visible=False) + _failed_command_rows() + [_mcp_row()]
+            rows += [
+                _tool("verify1", "tools.shell_command({command:'verify-task'})", "2026-08-14T00:00:05Z"),
+                _output("verify1", "POST-CONDITION: FAIL", "2026-08-14T00:00:06Z"),
+                _tool("verify2", "tools.shell_command({command:'verify-task'})", "2026-08-14T00:00:07Z"),
+                _output("verify2", "POST-CONDITION: PASS", "2026-08-14T00:00:08Z"),
+            ]
+            record = routing_eval.extract_trial(rows, pathlib.Path("p02.jsonl"), manifest)
+        self.assertEqual(record["first_command_exit_code"], 7)
+        self.assertIs(record["post_condition_passed"], True)
+        self.assertEqual(record["post_condition_evidence_index"], len(rows) - 1)
+
+    def test_post_condition_false_and_missing_remain_distinct_and_ignore_prose(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("P03-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})
+            manifest["post_condition"] = self._post_condition()
+            false_rows = _base_rollout("P03-T01", workspace, skill_visible=False) + [
+                _output("verify", "POST-CONDITION: FAIL", "2026-08-14T00:00:05Z")
+            ]
+            false_record = routing_eval.extract_trial(false_rows, pathlib.Path("p03-false.jsonl"), manifest)
+            missing_rows = _base_rollout("P03-T01", workspace, skill_visible=False) + [
+                _row("event_msg", {"type": "agent_message", "message": "POST-CONDITION: PASS"}, "2026-08-14T00:00:05Z")
+            ]
+            missing_record = routing_eval.extract_trial(missing_rows, pathlib.Path("p03-missing.jsonl"), manifest)
+        self.assertIs(false_record["post_condition_passed"], False)
+        self.assertIsNone(missing_record["post_condition_passed"])
+        self.assertIsNone(missing_record["post_condition_evidence_index"])
+
+    def test_prepare_rejects_ambiguous_post_condition_markers(self):
+        case = _case("P04")
+        case["post_condition"] = {
+            "kind": "tool_output_marker",
+            "pass_marker": "SAME",
+            "fail_marker": "SAME",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "post-condition"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
+
+class RoutingEvalReviewReportCompletenessTests(unittest.TestCase):
+    def test_report_separates_general_error_labels_from_reliability_causality(self):
+        records = [
+            _score_record(
+                "M01", arm="S", mcp_intervention_count=1,
+                wrong_repair=True, reliability_caused_wrong_repair=False,
+                false_completion=False, reliability_caused_false_completion=False,
+            ),
+            _score_record(
+                "M02", arm="S", mcp_intervention_count=1,
+                wrong_repair=False, reliability_caused_wrong_repair=False,
+                false_completion=True, reliability_caused_false_completion=False,
+            ),
+        ]
+        report = routing_eval.score_records(records)["arms"]["S"]
+        adjudication = report["adjudication"]
+        self.assertEqual(adjudication["wrong_repair_count"], 1)
+        self.assertEqual(adjudication["wrong_repair_reviewed"], 2)
+        self.assertEqual(adjudication["wrong_repair_review_coverage"], 1.0)
+        self.assertEqual(adjudication["false_completion_count"], 1)
+        self.assertEqual(adjudication["false_completion_reviewed"], 2)
+        self.assertEqual(adjudication["false_completion_review_coverage"], 1.0)
+        self.assertEqual(adjudication["reliability_caused_wrong_repair_count"], 0)
+        self.assertEqual(adjudication["reliability_caused_false_completion_count"], 0)
+        self.assertEqual(report["gates"]["reliability_caused_wrong_repair"], "PASS")
+        self.assertEqual(report["gates"]["reliability_caused_false_completion"], "PASS")
+
+
+class RoutingEvalReviewPostConditionEndToEndTests(unittest.TestCase):
+    def test_prepare_collect_score_carries_deterministic_post_condition(self):
+        case = _case("P05", lane="validation")
+        case["post_condition"] = {
+            "kind": "tool_output_marker",
+            "pass_marker": "POST-CONDITION: PASS",
+            "fail_marker": "POST-CONDITION: FAIL",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            manifest = routing_eval.prepare_campaign([case], root / "campaign", trials=1, seed=5)
+            sessions = root / "sessions"
+            sessions.mkdir()
+            for row in manifest:
+                workspace = pathlib.Path(row["workspace"])
+                rows = _base_rollout(row["case_key"], workspace, skill_visible=row["arm"] == "S")
+                rows += _failed_command_rows()
+                if row["arm"] == "S":
+                    rows += [_skill_row()]
+                rows += [_mcp_row()]
+                marker = "POST-CONDITION: PASS" if row["arm"] == "S" else "POST-CONDITION: FAIL"
+                rows += [_output("verify", marker, "2026-08-14T00:00:05Z")]
+                routing_eval.trigger_eval.write_jsonl(sessions / f"rollout-{row['sequence']}.jsonl", rows)
+            records = routing_eval.collect_rollouts(sessions, manifest)
+            report = routing_eval.score_records(records)
+        self.assertEqual({row["arm"]: row["post_condition_passed"] for row in records}, {"S": True, "M": False})
+        self.assertEqual(report["arms"]["S"]["lanes"]["admission"]["deterministic_post_condition_completion_rate"], 1.0)
+        self.assertEqual(report["arms"]["M"]["lanes"]["admission"]["deterministic_post_condition_completion_rate"], 0.0)

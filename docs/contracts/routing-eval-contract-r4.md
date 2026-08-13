@@ -16,6 +16,8 @@ Codex Desktop/app-server remains the normal command, process, sandbox, and appro
 
 Matched S/M trials keep the same Desktop build, model, reasoning effort, approval policy, sandbox type, Reliability MCP candidate/tool schemas, fixture definition, prompt text, and measurement policy. The only declared routing difference is companion-Skill exposure.
 
+Before performance scoring, matched `(case_id, trial_id)` rows must agree on `prompt_sha256`, `fixture_sha256`, model, effort, approval policy, sandbox type, Desktop/CLI runtime identity, and originator. Missing identity evidence or pair identity drift invalidates both arms for that pair; neither row may enter recall, false-activation, or paired-token denominators.
+
 S requires `powershell-reliability` to be observed in the Skill catalog. M requires it to be observed absent. A missing catalog is unresolved arm evidence and invalidates the trial.
 
 If supported reversible Skill exclusion cannot establish M while leaving the same MCP candidate reachable, M setup is BLOCKED rather than simulated.
@@ -36,6 +38,12 @@ Supported `boundary_detector.kind` values are:
 - `tool_output_contains` for an exact sanitized marker in tool output.
 
 The harness never infers an eligible boundary from assistant prose. Command outcome and deterministic task post-condition remain separate facts.
+
+## Deterministic task post-condition
+
+A case may freeze `post_condition.kind=none` or `post_condition.kind=tool_output_marker` before execution. `tool_output_marker` requires distinct non-empty `pass_marker` and `fail_marker` values. The collector considers only matching `custom_tool_call_output` evidence and uses the latest matching deterministic output; assistant prose is never post-condition evidence.
+
+The normalized record stores `post_condition_passed` as `true`, `false`, or missing (`null`) plus the bounded evidence index/timestamp. Missing evidence remains missing. If one tool output contains both frozen pass and fail markers, the trial is invalid as ambiguous. The frozen markers are never rewritten from repair output or assistant claims.
 
 ## Normalized record
 
@@ -69,6 +77,8 @@ Case stability reports repeated activation behavior without changing denominator
 
 Adjudication JSONL is keyed by `(case_id, trial_id, arm)` and may contain bounded repair/completion labels plus `evidence_ref`.
 Boolean adjudication labels may be `null` when genuinely unreviewed or causally ambiguous. A missing causal label remains unresolved; it is never treated as `false`.
+
+The score report keeps ordinary outcome labels separate from causal attribution. It reports `wrong_repair` and `false_completion` counts plus `wrong_repair review coverage` / false-completion review coverage across valid trials, while Reliability-caused counts and review coverage use the intervention population. A wrong repair is not automatically a Reliability-caused wrong repair, and a false completion is not automatically Reliability-caused.
 
 ## Token and latency rules
 

@@ -13,6 +13,11 @@ VALID_ARMS = {"S", "M"}
 VALID_LANES = {"train", "validation", "holdout"}
 VALID_GROUPS = {"should_trigger", "should_not_trigger", "boundary"}
 BOUNDARY_KINDS = {"none", "first_command_nonzero", "tool_output_contains"}
+POST_CONDITION_KINDS = {"none", "tool_output_marker"}
+PAIR_CONSISTENCY_FIELDS = (
+    "prompt_sha256", "fixture_sha256", "model", "effort",
+    "approval_policy", "sandbox_type", "cli_version", "originator",
+)
 TOKEN_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -47,6 +52,20 @@ def _fixture_sha256(files: dict[str, str]) -> str:
     return digest.hexdigest().upper()
 
 
+def _post_condition_rule(case: dict) -> dict:
+    rule = case.get("post_condition", {"kind": "none"})
+    if not isinstance(rule, dict) or rule.get("kind") not in POST_CONDITION_KINDS:
+        raise ValueError(f"invalid post-condition rule for {case.get('case_id')}")
+    if rule["kind"] == "tool_output_marker":
+        pass_marker = rule.get("pass_marker")
+        fail_marker = rule.get("fail_marker")
+        if not isinstance(pass_marker, str) or not pass_marker or not isinstance(fail_marker, str) or not fail_marker:
+            raise ValueError("post-condition markers must be non-empty strings")
+        if pass_marker == fail_marker:
+            raise ValueError("post-condition pass/fail markers must differ")
+    return rule
+
+
 def _validate_case(case: dict) -> None:
     if not isinstance(case.get("case_id"), str) or not case["case_id"]:
         raise ValueError("case_id must be a non-empty string")
@@ -63,6 +82,7 @@ def _validate_case(case: dict) -> None:
         raise ValueError(f"invalid boundary detector for {case['case_id']}")
     if detector.get("kind") == "tool_output_contains" and not isinstance(detector.get("marker"), str):
         raise ValueError("tool_output_contains requires a marker")
+    _post_condition_rule(case)
     files = case.get("files") or {}
     if not isinstance(files, dict):
         raise ValueError(f"case {case['case_id']} files must be an object")
@@ -136,6 +156,7 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
                     "fixture_sha256": fixture_hash,
                     "expected_first_command_fragment": case.get("expected_first_command_fragment"),
                     "boundary_detector": dict(case["boundary_detector"]),
+                    "post_condition": dict(_post_condition_rule(case)),
                 })
     for sequence, row in enumerate(manifest, 1):
         row["sequence"] = sequence
@@ -217,6 +238,34 @@ def find_eligible_boundary(rows: list[dict], manifest_row: dict, first_command: 
     raise ValueError(f"unsupported boundary detector {kind!r}")
 
 
+def evaluate_post_condition(rows: list[dict], manifest_row: dict) -> dict:
+    rule = manifest_row.get("post_condition", {"kind": "none"})
+    kind = rule.get("kind") if isinstance(rule, dict) else None
+    if kind == "none":
+        return {"passed": None, "index": None, "timestamp": None, "invalid_reason": None}
+    if kind != "tool_output_marker":
+        raise ValueError(f"unsupported post-condition rule {kind!r}")
+    pass_marker = rule["pass_marker"]
+    fail_marker = rule["fail_marker"]
+    latest = None
+    for index, row in enumerate(rows):
+        if row.get("type") != "response_item":
+            continue
+        payload = row.get("payload") or {}
+        if payload.get("type") != "custom_tool_call_output":
+            continue
+        text = trigger_eval._flatten_text(payload.get("output"))
+        has_pass = pass_marker in text
+        has_fail = fail_marker in text
+        if not has_pass and not has_fail:
+            continue
+        if has_pass and has_fail:
+            latest = {"passed": None, "index": index, "timestamp": row.get("timestamp"), "invalid_reason": "post_condition_ambiguous"}
+        else:
+            latest = {"passed": has_pass, "index": index, "timestamp": row.get("timestamp"), "invalid_reason": None}
+    return latest or {"passed": None, "index": None, "timestamp": None, "invalid_reason": None}
+
+
 def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: dict) -> dict:
     base = trigger_eval.extract_rollout(rows, rollout_path)
     if base is None:
@@ -224,12 +273,15 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
     calls, outputs = _scan_tool_events(rows)
     first_command = _first_command(calls, outputs)
     boundary = find_eligible_boundary(rows, manifest_row, first_command)
+    post_condition = evaluate_post_condition(rows, manifest_row)
     skill_calls = [call for call in calls if trigger_eval.PSR_SKILL in trigger_eval._skill_names(call["input"])]
     mcp_calls = [call for call in calls if trigger_eval.PSR_MCP in call["input"]]
     skill_indexes = [call["index"] for call in skill_calls]
     mcp_indexes = [call["index"] for call in mcp_calls]
     boundary_index = boundary.get("index") if boundary else None
     invalid_reasons = []
+    if post_condition["invalid_reason"] is not None:
+        invalid_reasons.append(post_condition["invalid_reason"])
     if base["case_key"] != manifest_row.get("case_key"):
         invalid_reasons.append("case_marker_mismatch")
     if base.get("prompt_sha256") != manifest_row.get("prompt_sha256"):
@@ -301,6 +353,10 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
         "selected_other_skills": base.get("selected_other_skills") or [],
         "turn_complete_index": turn_complete_index,
         "turn_complete_timestamp": turn_complete_timestamp,
+        "post_condition_kind": (manifest_row.get("post_condition") or {"kind": "none"}).get("kind"),
+        "post_condition_passed": post_condition["passed"],
+        "post_condition_evidence_index": post_condition["index"],
+        "post_condition_evidence_timestamp": post_condition["timestamp"],
         "valid": not invalid_reasons,
         "invalid_reasons": invalid_reasons,
     }
@@ -561,6 +617,63 @@ def _validate_score_record(row: dict) -> None:
             raise ValueError("token_usage.total_tokens must be a non-negative integer")
 
 
+def _apply_pair_consistency(records: list[dict]) -> list[dict]:
+    checked = []
+    for source in records:
+        row = dict(source)
+        row["invalid_reasons"] = list(source.get("invalid_reasons") or [])
+        checked.append(row)
+    pairs = defaultdict(list)
+    for row in checked:
+        pairs[(row["case_id"], row["trial_id"])].append(row)
+    for pair_rows in pairs.values():
+        by_arm = {row["arm"]: row for row in pair_rows}
+        if set(by_arm) != VALID_ARMS or len(pair_rows) != 2:
+            continue
+        reasons = []
+        for field in PAIR_CONSISTENCY_FIELDS:
+            values = [by_arm[arm].get(field) for arm in ("S", "M")]
+            if any(value is None or value == "" for value in values):
+                reasons.append(f"pair_identity_missing:{field}")
+            elif values[0] != values[1]:
+                reasons.append(f"pair_identity_drift:{field}")
+        if reasons:
+            for row in pair_rows:
+                row["valid"] = False
+                for reason in reasons:
+                    if reason not in row["invalid_reasons"]:
+                        row["invalid_reasons"].append(reason)
+    return checked
+
+
+def _pair_consistency_summary(rows: list[dict]) -> dict:
+    pairs = defaultdict(list)
+    for row in rows:
+        pairs[(row["case_id"], row["trial_id"])].append(row)
+    matched = [
+        pair for pair in pairs.values()
+        if len(pair) == 2 and {row["arm"] for row in pair} == VALID_ARMS
+    ]
+    reasons = defaultdict(int)
+    invalid_pairs = 0
+    for pair in matched:
+        pair_reasons = {
+            reason
+            for row in pair
+            for reason in row.get("invalid_reasons", [])
+            if reason.startswith("pair_identity_")
+        }
+        if pair_reasons:
+            invalid_pairs += 1
+            for reason in pair_reasons:
+                reasons[reason] += 1
+    return {
+        "matched_pair_count": len(matched),
+        "invalid_pair_count": invalid_pairs,
+        "invalid_reasons": dict(sorted(reasons.items())),
+    }
+
+
 def _lane_metrics(rows: list[dict], arm: str) -> dict:
     triggers = [row for row in rows if row["group"] == "should_trigger"]
     negatives = [row for row in rows if row["group"] == "should_not_trigger"]
@@ -636,6 +749,16 @@ def _rate_gate(value: float | None, threshold: float, minimum: bool) -> str:
     return GATE_PASS if passed else GATE_FAIL
 
 
+def _review_summary(rows: list[dict], field: str) -> dict:
+    reviewed = sum(isinstance(row.get(field), bool) for row in rows)
+    positive = sum(row.get(field) is True for row in rows)
+    return {
+        "count": positive,
+        "reviewed": reviewed,
+        "coverage": reviewed / len(rows) if rows else None,
+    }
+
+
 def _arm_report(rows: list[dict], arm: str) -> dict:
     arm_rows = [row for row in rows if row["arm"] == arm]
     valid_rows = [row for row in arm_rows if row["valid"]]
@@ -659,12 +782,10 @@ def _arm_report(rows: list[dict], arm: str) -> dict:
     intervention_rows = [
         row for row in valid_rows if int(row.get("mcp_intervention_count") or 0) > 0
     ]
-    wrong_reviewed = sum(
-        row.get("reliability_caused_wrong_repair") is not None for row in intervention_rows
-    )
-    false_reviewed = sum(
-        row.get("reliability_caused_false_completion") is not None for row in intervention_rows
-    )
+    wrong_repair = _review_summary(valid_rows, "wrong_repair")
+    false_completion = _review_summary(valid_rows, "false_completion")
+    causal_wrong = _review_summary(intervention_rows, "reliability_caused_wrong_repair")
+    causal_false = _review_summary(intervention_rows, "reliability_caused_false_completion")
     return {
         "trial_count": len(arm_rows),
         "valid_trial_count": len(valid_rows),
@@ -680,9 +801,22 @@ def _arm_report(rows: list[dict], arm: str) -> dict:
             bool(row.get("selected_other_skills")) for row in valid_rows
         ),
         "adjudication": {
+            "valid_trial_count": len(valid_rows),
             "intervention_trial_count": len(intervention_rows),
-            "wrong_repair_causal_reviewed": wrong_reviewed,
-            "false_completion_causal_reviewed": false_reviewed,
+            "wrong_repair_count": wrong_repair["count"],
+            "wrong_repair_reviewed": wrong_repair["reviewed"],
+            "wrong_repair_review_coverage": wrong_repair["coverage"],
+            "false_completion_count": false_completion["count"],
+            "false_completion_reviewed": false_completion["reviewed"],
+            "false_completion_review_coverage": false_completion["coverage"],
+            "reliability_caused_wrong_repair_count": causal_wrong["count"],
+            "reliability_caused_wrong_repair_reviewed": causal_wrong["reviewed"],
+            "reliability_caused_wrong_repair_review_coverage": causal_wrong["coverage"],
+            "reliability_caused_false_completion_count": causal_false["count"],
+            "reliability_caused_false_completion_reviewed": causal_false["reviewed"],
+            "reliability_caused_false_completion_review_coverage": causal_false["coverage"],
+            "wrong_repair_causal_reviewed": causal_wrong["reviewed"],
+            "false_completion_causal_reviewed": causal_false["reviewed"],
         },
         "gates": {
             "pre_failure_mcp": pre_failure_gate,
@@ -756,12 +890,14 @@ def score_records(records: list[dict]) -> dict:
         if identity in seen:
             raise ValueError(f"duplicate routing trial identity {identity}")
         seen.add(identity)
-    arms = {arm: _arm_report(records, arm) for arm in sorted(VALID_ARMS)}
+    checked_records = _apply_pair_consistency(records)
+    arms = {arm: _arm_report(checked_records, arm) for arm in sorted(VALID_ARMS)}
     return {
         "schema_version": 1,
         "record_count": len(records),
+        "pair_consistency": _pair_consistency_summary(checked_records),
         "arms": arms,
-        "paired_idle_token": _paired_idle_token(records),
+        "paired_idle_token": _paired_idle_token(checked_records),
         "production_shadow": {
             "gate_state": "NOT_MEASURED",
             "false_activation_limit_per_100_turns": 1.0,

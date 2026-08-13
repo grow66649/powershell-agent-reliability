@@ -48,7 +48,7 @@ python .\benchmarks\harness\routing_eval.py prepare `
   --trials 3 --seed <frozen-seed>
 ```
 
-Record the generated manifest hash before running scored turns.
+Record the generated manifest hash before running scored turns. If a case declares a deterministic post-condition, freeze its `post_condition` rule and exact pass/fail markers before execution; do not derive or revise those criteria from later model output.
 ## 5. Execute manifest rows in normal Desktop
 
 For every manifest row:
@@ -103,3 +103,11 @@ The controlled harness does not infer production-shadow evidence. The later user
 Only after the owner selects S or M and the shadow gate is satisfied may the selected routing shape proceed to the harder repeated autonomous-Desktop versus Reliability recovery A/B.
 
 Main merge, release packaging, plugin/default recommendation, and always-on recommendation remain blocked until those downstream gates and explicit owner admission pass.
+
+## Review-fix operator constraints
+
+For each matched `(case_id, trial_id)` pair, preserve the same prompt/fixture identity, model, effort, approval policy, sandbox type, Desktop/CLI runtime identity, and Desktop originator. If collection shows missing identity evidence or cross-arm drift, treat that pair as invalid evidence; do not include either arm in performance denominators.
+
+For cases with a frozen `post_condition.kind=tool_output_marker`, only the declared deterministic validator's matching tool-output marker is eligible evidence. Assistant prose or a self-reported completion claim never establishes the task post-condition. Keep the frozen pass/fail markers unchanged after the campaign starts.
+
+When reviewing the score report, inspect ordinary `wrong_repair` and `false_completion` counts and review coverage separately from `reliability_caused_wrong_repair` and `reliability_caused_false_completion`. Causal attribution requires its own bounded human decision and evidence reference.
