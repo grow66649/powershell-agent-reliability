@@ -83,6 +83,12 @@ fn tool_output_schema_inlines_nested_agent_results() {
     let environment = serde_json::Value::Object(schema_for_output::<EnvironmentDigest>().as_ref().clone());
     assert!(!environment["properties"]["cwd"].to_string().contains("\"$ref\""));
     assert!(!environment["properties"]["critical_executables"]["items"].to_string().contains("\"$ref\""));
+    let shell_schema = &environment["properties"]["shell"];
+    assert!(shell_schema.to_string().contains("executable_file_version"));
+    assert!(!shell_schema.to_string().contains("\"version\""));
+    let executable_schema = &environment["properties"]["critical_executables"]["items"];
+    assert_eq!(executable_schema["properties"]["executable_file_version"]["type"], serde_json::json!(["string", "null"]));
+    assert!(executable_schema["properties"].get("version").is_none());
 
     let verification = serde_json::Value::Object(schema_for_output::<VerificationResult>().as_ref().clone());
     assert!(!verification["properties"]["checks"]["items"].to_string().contains("\"$ref\""));

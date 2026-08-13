@@ -26,7 +26,13 @@ fn digest_is_privacy_bounded_and_resolves_explicit_executable() {
     let shell = digest.shell.as_ref().expect("shell identity");
     assert_eq!(shell.family, "WindowsPowerShell");
     assert_eq!(shell.resolution_status, "resolved");
-    assert!(shell.version.is_some());
+    let json_value = serde_json::to_value(&digest).expect("serialize digest value");
+    let shell_object = json_value["shell"].as_object().expect("shell object");
+    assert!(shell_object.contains_key("executable_file_version"));
+    assert!(!shell_object.contains_key("version"));
+    let executable = json_value["critical_executables"][0].as_object().expect("executable object");
+    assert!(executable.contains_key("executable_file_version"));
+    assert!(!executable.contains_key("version"));
     let json = serde_json::to_string(&digest).expect("serialize digest");
     assert!(!json.contains(&cwd.display().to_string()));
     assert!(!json.contains(&std::env::var("PATH").unwrap_or_default()));

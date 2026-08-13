@@ -48,7 +48,7 @@ pub struct EnvironmentDigest {
 #[schemars(inline)]
 pub struct ShellIdentity {
     pub family: String,
-    pub version: Option<String>,
+    pub executable_file_version: Option<String>,
     pub architecture: String,
     pub resolution_status: String,
     pub resolved_path_sha256: Option<String>,
@@ -75,7 +75,7 @@ pub struct ExecutableIdentity {
     pub resolution_status: String,
     pub source_class: String,
     pub resolved_path_sha256: Option<String>,
-    pub version: Option<String>,
+    pub executable_file_version: Option<String>,
     pub file_sha256: Option<String>,
     pub architecture: Option<String>,
 }
@@ -187,14 +187,14 @@ fn shell_identity(requested: &str) -> Result<ShellIdentity, String> {
     Ok(match resolved {
         Some(item) => ShellIdentity {
             family,
-            version: file_version(&item.path),
+            executable_file_version: file_version(&item.path),
             architecture: pe_architecture(&item.path).unwrap_or_else(|| "unknown".to_owned()),
             resolution_status: "resolved".to_owned(),
             resolved_path_sha256: Some(hash_path(&item.path)),
         },
         None => ShellIdentity {
             family,
-            version: None,
+            executable_file_version: None,
             architecture: "unknown".to_owned(),
             resolution_status: "not_found".to_owned(),
             resolved_path_sha256: None,
@@ -214,7 +214,7 @@ fn executable_identity(requested: &str) -> Result<ExecutableIdentity, String> {
             resolution_status: "not_found".to_owned(),
             source_class: "not_found".to_owned(),
             resolved_path_sha256: None,
-            version: None,
+            executable_file_version: None,
             file_sha256: None,
             architecture: None,
         });
@@ -230,7 +230,7 @@ fn executable_identity(requested: &str) -> Result<ExecutableIdentity, String> {
         resolution_status: "resolved".to_owned(),
         source_class: item.source_class.to_owned(),
         resolved_path_sha256: Some(hash_path(&item.path)),
-        version: file_version(&item.path),
+        executable_file_version: file_version(&item.path),
         file_sha256: file_hash,
         architecture: pe_architecture(&item.path),
     })
