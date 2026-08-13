@@ -567,3 +567,29 @@ class RoutingEvalEndToEndTests(unittest.TestCase):
         self.assertEqual(set(report["arms"]), {"S", "M"})
         self.assertEqual(report["arms"]["S"]["gates"]["mcp_intervention_recall"], "PASS")
         self.assertEqual(report["arms"]["M"]["gates"]["mcp_intervention_recall"], "PASS")
+
+
+class RoutingEvalRepositoryContractTests(unittest.TestCase):
+    def test_repository_contract_and_runbook_freeze_r4_invariants(self):
+        repo = pathlib.Path(__file__).resolve().parents[2]
+        contract_path = repo / "docs" / "contracts" / "routing-eval-contract-r4.md"
+        runbook_path = repo / "docs" / "runbooks" / "routing-eval-desktop.md"
+        contract = contract_path.read_text(encoding="utf-8")
+        runbook = runbook_path.read_text(encoding="utf-8")
+        combined = contract + "\n" + runbook
+        required = [
+            "S=`thin companion Skill + MCP`",
+            "M=`MCP-only self-routing`",
+            "Arm H is excluded for the current Desktop build",
+            "pre-failure MCP = 0",
+            "MCP intervention recall >= 90%",
+            "controlled false activation <= 5%",
+            "production shadow <= 1/100",
+            "paired idle-token delta <= +2%",
+            "token coverage >= 90%",
+            "missing measurements remain missing",
+            "M setup is BLOCKED rather than simulated",
+            "raw rollout evidence stays host-local",
+        ]
+        for phrase in required:
+            self.assertIn(phrase, combined)
