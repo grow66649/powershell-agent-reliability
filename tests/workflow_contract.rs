@@ -14,12 +14,17 @@ fn runtime_instructions_bound_failure_only_intervention() {
 #[test]
 fn companion_skill_documents_the_same_guardrails() {
     let skill = include_str!("../skills/powershell-reliability/SKILL.md");
-    let reference = include_str!("../skills/powershell-reliability/references/tool-usage.md");
-    for text in [skill, reference] {
-        assert!(text.contains("Freeze the task post-condition before diagnosis or repair"));
-        assert!(text.contains("probe/helper errors are not evidence about the original task failure"));
-        assert!(text.contains("diagnose_failure once per failure boundary"));
-        assert!(text.contains("If that repair fails the frozen post-condition, stop and report failure"));
-        assert!(text.contains("Never use observed candidate output as the expected verification value"));
+    for required in [
+        "Before the first execution attempt",
+        "Pure command/post-condition disagreement",
+        "do not call `inspect_environment`",
+        "one explicitly missing fact",
+        "at most one evidence-backed repair",
+        "exactly one `verify_result`",
+        "Never weaken criteria",
+        "Never derive expected values from repaired candidate output",
+    ] {
+        assert!(skill.contains(required), "missing Skill guardrail: {required}");
     }
+    assert!(!skill.contains("references/tool-usage.md"));
 }

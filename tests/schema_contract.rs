@@ -96,12 +96,15 @@ fn tool_output_schema_inlines_nested_agent_results() {
 }
 
 #[test]
-fn skill_reference_documents_exact_nested_tool_shapes() {
-    let reference = include_str!("../skills/powershell-reliability/references/tool-usage.md");
-    assert!(reference.contains("\"observed_shell\": {\"family\": \"PowerShell\", \"major\": 7, \"minor\": 6}"));
-    assert!(reference.contains("{\"kind\": \"file_sha256\", \"path\": \"output.txt\", \"expected_sha256\":"));
-    assert!(reference.contains("{\"kind\": \"file_size\", \"path\": \"output.txt\", \"min_bytes\": 5, \"max_bytes\": 5}"));
+fn companion_skill_does_not_duplicate_mcp_schema_reference() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("skills")
+        .join("powershell-reliability");
+    assert!(root.join("SKILL.md").is_file());
+    assert!(root.join("agents/openai.yaml").is_file());
+    assert!(!root.join("references/tool-usage.md").exists());
 }
+
 #[test]
 fn tool_input_schema_rejects_unknown_fields() {
     let environment = serde_json::to_value(schema_for!(InspectEnvironmentRequest))

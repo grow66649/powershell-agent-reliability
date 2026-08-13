@@ -1,38 +1,29 @@
 ---
 name: powershell-reliability
-description: Failure-only reliability workflow for Windows Codex Desktop using the local PowerShell Reliability MCP. Use after a PowerShell/native command fails, times out, has a parser/binding/resolution error, violates a declared shell/cwd/executable identity expectation, or when an explicit task post-condition disagrees with the command exit status. Also use to verify a repaired Windows task before claiming completion. Do not invoke on a known-good first attempt whose required post-condition already passes.
+description: Use this skill after a Windows Codex Desktop PowerShell or native-command failure: non-zero exit, timeout/cancellation ambiguity, parser/binding/command-resolution failure, declared shell/cwd/executable identity mismatch, or an explicit task post-condition that is false even when exit code is 0. Do not use before the first attempt, for known-good successful work, for ordinary PowerShell explanation/code-writing, for unrelated MCP/connector/backend failures, for stderr-only warnings when the required task outcome passed, or merely because multiple PowerShell versions are installed.
 ---
 
 # PowerShell Reliability
 
-Keep Codex Desktop/app-server as the command and process owner. Use the MCP only for bounded environment identity, diagnosis, and post-condition verification.
+Keep Codex Desktop/app-server as the command and process owner. Use Reliability only after an eligible failed execution boundary; the MCP supplies bounded observation, diagnosis, and deterministic verification, not a second shell or repair engine.
 
-## Failure-only workflow
+## Common path
 
-1. Leave the first execution attempt unchanged. If the command outcome and required post-condition both pass, do not call this MCP.
-2. After an eligible failure, preserve the original exit code, timeout state, stdout/stderr facts, and post-condition truth separately. Freeze the task post-condition before diagnosis or repair. Expected hashes, sizes, or other target values must come from the user/task or be derived from the declared target before observing repaired candidate output.
-3. Keep probe/helper failures separate: probe/helper errors are not evidence about the original task failure unless that probe is itself the task boundary. Call `inspect_environment` only when shell identity, cwd, PATH resolution, or a task-declared critical executable may matter.
-4. Call diagnose_failure once per failure boundary with bounded structured facts. Call it again only after `UNKNOWN` with newly collected missing facts, or after a genuinely new failure boundary.
-5. Treat the returned class as evidence, not permission to bypass safety. Do not add unrelated probes after a high-confidence diagnosis.
-6. Perform at most one evidence-backed repair step through Codex Desktop's normal tools. If that repair fails the frozen post-condition, stop and report failure; do not perform a second repair in the same Reliability intervention.
-7. Call `verify_result` once after repair against the frozen deterministic post-condition before declaring completion. Never weaken checks after a failed verification. Never use observed candidate output as the expected verification value. Report command success and task success independently when they differ.
+1. Before the first execution attempt, make no Reliability intervention.
+2. If the command outcome and required post-condition both pass, stop with zero MCP calls.
+3. Freeze the deterministic task criteria before diagnosis or repair. Expected hashes, sizes, names, and other target values must come from the user/task or declared target, never from repaired candidate output.
+4. Pure command/post-condition disagreement: call `diagnose_failure` directly; do not call `inspect_environment`.
+5. Call `inspect_environment` only when shell, cwd, PATH resolution, or executable identity can causally matter to the observed failure.
+6. Keep probe/helper failures separate from the original task failure unless the probe is itself the failed task boundary.
+7. Call `diagnose_failure` once per failure boundary with bounded structured facts. After a high-confidence diagnosis, do not add unrelated probes.
+8. If diagnosis is `UNKNOWN`, collect only one explicitly missing fact identified by the diagnosis, then make at most one re-diagnosis.
+9. Perform at most one evidence-backed repair through Codex Desktop's normal tools. If the frozen criteria still fail, stop and report failure; do not perform a second repair in the same Reliability intervention.
+10. After repair, perform exactly one `verify_result` against the frozen criteria before claiming completion.
+11. Never weaken criteria after a failed verification. Never derive expected values from repaired candidate output. Keep command success and task success separate.
 
-## Repair rules
+## Safety and scope
 
-- `QUOTING_EXPANSION`: prefer structured executable + argv for native tools or an explicit PowerShell script/file boundary. Never invent a universal escaping function.
-- `CWD_PATH_IDENTITY`: bind the intended cwd explicitly before searching, moving, or retrying relative paths.
-- `SHELL_VERSION_MISMATCH`: select a compatible shell or compatible syntax; do not retry unchanged across shell families.
-- `NATIVE_PROCESS_OUTCOME`: preserve exit code, stdout, stderr, and post-condition separately before interpreting the native program's failure.
-- `TIMEOUT_CANCELLATION`: identify the timeout owner and verify the owned process state before retrying.
-- `POST_CONDITION_MISMATCH`: trust the explicit post-condition as a separate fact; exit code alone never proves task completion.
-- `ENVIRONMENT_STALENESS`: refresh the bounded environment digest after install/workspace/environment boundaries.
-- `DESKTOP_SANDBOX_BOUNDARY`: keep attribution at the Desktop/security boundary until proven otherwise. Never weaken the sandbox, ACLs, approvals, profiles, or global environment automatically.
-- `UNKNOWN`: reduce uncertainty with the smallest relevant observation; do not fabricate a root cause.
+Treat MCP `next_action` as evidence-backed guidance, not permission to bypass security or task constraints. Never weaken Codex sandboxing, Windows ACLs, approval policy, PowerShell profiles, or global environment settings automatically.
+Never send or persist full PATH, complete environment variables, credentials, tokens, cookies, browser state, command history, unrelated software inventory, or broad machine logs. Exact local paths may be supplied to a tool only when required for the current task; tool outputs should remain hashed or otherwise bounded.
 
-## Privacy and scope
-
-Never send or persist full PATH, complete environment variables, credentials, tokens, cookies, browser state, command history, unrelated software inventory, or broad machine logs. Exact local paths may be supplied to a tool only when required for the current task; tool outputs should remain hashed/bounded.
-
-If the MCP is unavailable, continue with ordinary Codex reasoning and tools. Do not modify global configuration merely to make the reliability layer available during an unrelated task.
-
-Read `references/tool-usage.md` only when constructing tool arguments or interpreting structured results.
+If the Reliability MCP is unavailable, continue with ordinary Codex reasoning and tools. Do not modify global configuration merely to make Reliability available during an unrelated task.
