@@ -351,3 +351,151 @@ class RoutingEvalCostTests(unittest.TestCase):
         self.assertIsNone(
             routing_eval.timestamp_delta_ms("2026-08-14T00:00:02Z", "2026-08-14T00:00:01Z")
         )
+
+
+def _score_record(case_id="R20", trial_id="T01", arm="S", group="should_trigger", lane="validation", **updates):
+    record = {
+        "case_id": case_id,
+        "trial_id": trial_id,
+        "arm": arm,
+        "group": group,
+        "lane": lane,
+        "valid": True,
+        "invalid_reasons": [],
+        "mcp_intervention_count": 0,
+        "pre_boundary_mcp_call_count": 0,
+        "skill_activation_count": 0,
+        "premature_skill_activation": False,
+        "s_protocol_bypass": False,
+        "selected_other_skills": [],
+        "token_usage": None,
+        "boundary_to_mcp_ms": None,
+        "boundary_to_skill_ms": None,
+        "turn_duration_ms": None,
+        "post_condition_passed": None,
+        "wrong_repair": None,
+        "reliability_caused_wrong_repair": None,
+        "completion_claimed": None,
+        "false_completion": None,
+        "reliability_caused_false_completion": None,
+        "evidence_ref": None,
+    }
+    record.update(updates)
+    return record
+
+
+class RoutingEvalAdjudicationTests(unittest.TestCase):
+    def test_merge_adjudication_preserves_missing_causal_labels(self):
+        records = [_score_record()]
+        adjudication = [{
+            "case_id": "R20", "trial_id": "T01", "arm": "S",
+            "wrong_repair": False, "completion_claimed": True,
+            "false_completion": False, "evidence_ref": "review://R20-T01-S",
+        }]
+        merged = routing_eval.merge_adjudication(records, adjudication)
+        self.assertIsNone(merged[0]["reliability_caused_wrong_repair"])
+        self.assertIsNone(merged[0]["reliability_caused_false_completion"])
+
+    def test_merge_rejects_duplicate_unknown_and_invalid_types(self):
+        records = [_score_record()]
+        row = {"case_id": "R20", "trial_id": "T01", "arm": "S", "wrong_repair": False}
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            routing_eval.merge_adjudication(records, [row, dict(row)])
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            routing_eval.merge_adjudication(records, [dict(row, case_id="R99")])
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            routing_eval.merge_adjudication(records, [dict(row, wrong_repair="no")])
+
+
+class RoutingEvalScoringTests(unittest.TestCase):
+    def test_scores_post_boundary_mcp_recall_and_arm_specific_false_activation(self):
+        records = [
+            _score_record("R21", arm="S", skill_activation_count=1),
+            _score_record("R22", arm="M", mcp_intervention_count=1),
+            _score_record("R23", arm="S", group="should_not_trigger", skill_activation_count=1),
+            _score_record("R24", arm="M", group="should_not_trigger"),
+            _score_record("R25", arm="S", group="boundary", mcp_intervention_count=1),
+            _score_record("R26", arm="S", valid=False, invalid_reasons=["workspace_mismatch"], mcp_intervention_count=1),
+        ]
+        report = routing_eval.score_records(records)
+        s_admission = report["arms"]["S"]["lanes"]["admission"]
+        m_admission = report["arms"]["M"]["lanes"]["admission"]
+        self.assertEqual(s_admission["mcp_intervention_recall"], 0.0)
+        self.assertEqual(s_admission["skill_read_recall"], 1.0)
+        self.assertEqual(s_admission["false_activation_rate"], 1.0)
+        self.assertEqual(m_admission["mcp_intervention_recall"], 1.0)
+        self.assertEqual(m_admission["false_activation_rate"], 0.0)
+        self.assertEqual(report["arms"]["S"]["invalid_trial_count"], 1)
+        self.assertEqual(report["arms"]["S"]["boundary_trial_count"], 1)
+
+    def test_pre_failure_mcp_and_s_protocol_bypass_are_reported(self):
+        records = [
+            _score_record("R27", arm="S", mcp_intervention_count=1, pre_boundary_mcp_call_count=1, s_protocol_bypass=True),
+            _score_record("R28", arm="M", mcp_intervention_count=1),
+        ]
+        report = routing_eval.score_records(records)
+        self.assertEqual(report["arms"]["S"]["gates"]["pre_failure_mcp"], "FAIL")
+        self.assertEqual(report["arms"]["S"]["s_protocol_bypass_count"], 1)
+
+    def test_paired_idle_token_gate_requires_coverage_and_uses_median_percent(self):
+        records = []
+        for index in range(10):
+            case_id = f"N{index:02d}"
+            m_total = 1000
+            s_total = 1010 if index < 9 else 1030
+            records.append(_score_record(case_id, arm="S", group="should_not_trigger", token_usage={"total_tokens": s_total}))
+            records.append(_score_record(case_id, arm="M", group="should_not_trigger", token_usage={"total_tokens": m_total}))
+        report = routing_eval.score_records(records)
+        paired = report["paired_idle_token"]
+        self.assertEqual(paired["coverage"], 1.0)
+        self.assertEqual(paired["median_s_minus_m_pct"], 1.0)
+        self.assertEqual(paired["gate_state"], "PASS")
+
+    def test_paired_idle_token_gate_is_unresolved_below_ninety_percent(self):
+        records = []
+        for index in range(10):
+            case_id = f"Q{index:02d}"
+            s_usage = {"total_tokens": 1010} if index < 8 else None
+            records.append(_score_record(case_id, arm="S", group="should_not_trigger", token_usage=s_usage))
+            records.append(_score_record(case_id, arm="M", group="should_not_trigger", token_usage={"total_tokens": 1000}))
+        paired = routing_eval.score_records(records)["paired_idle_token"]
+        self.assertEqual(paired["coverage"], 0.8)
+        self.assertEqual(paired["gate_state"], "UNRESOLVED")
+
+    def test_missing_arm_token_or_zero_m_total_is_unscorable(self):
+        records = [
+            _score_record("Z01", arm="S", group="should_not_trigger", token_usage=None),
+            _score_record("Z01", arm="M", group="should_not_trigger", token_usage={"total_tokens": 100}),
+            _score_record("Z02", arm="S", group="should_not_trigger", token_usage={"total_tokens": 100}),
+            _score_record("Z02", arm="M", group="should_not_trigger", token_usage={"total_tokens": 0}),
+        ]
+        paired = routing_eval.score_records(records)["paired_idle_token"]
+        self.assertEqual(paired["eligible_pair_count"], 2)
+        self.assertEqual(paired["scorable_pair_count"], 0)
+        self.assertEqual(paired["coverage"], 0.0)
+
+    def test_causal_hard_gates_fail_on_positive_labels(self):
+        records = [
+            _score_record(
+                "C01", arm="S", mcp_intervention_count=1,
+                reliability_caused_wrong_repair=True,
+                reliability_caused_false_completion=False,
+            )
+        ]
+        gates = routing_eval.score_records(records)["arms"]["S"]["gates"]
+        self.assertEqual(gates["reliability_caused_wrong_repair"], "FAIL")
+        records[0]["reliability_caused_wrong_repair"] = False
+        records[0]["reliability_caused_false_completion"] = True
+        gates = routing_eval.score_records(records)["arms"]["S"]["gates"]
+        self.assertEqual(gates["reliability_caused_false_completion"], "FAIL")
+
+    def test_causal_hard_gates_are_unresolved_until_interventions_reviewed(self):
+        record = _score_record("C02", arm="M", mcp_intervention_count=1)
+        gates = routing_eval.score_records([record])["arms"]["M"]["gates"]
+        self.assertEqual(gates["reliability_caused_wrong_repair"], "UNRESOLVED")
+        self.assertEqual(gates["reliability_caused_false_completion"], "UNRESOLVED")
+        record["reliability_caused_wrong_repair"] = False
+        record["reliability_caused_false_completion"] = False
+        gates = routing_eval.score_records([record])["arms"]["M"]["gates"]
+        self.assertEqual(gates["reliability_caused_wrong_repair"], "PASS")
+        self.assertEqual(gates["reliability_caused_false_completion"], "PASS")

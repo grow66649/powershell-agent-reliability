@@ -441,3 +441,329 @@ def _cost_fields(rows: list[dict], boundary: dict | None, skill_calls: list[dict
             missing.append(key)
     values["missing_measurements"] = missing
     return values
+
+
+ADJUDICATION_BOOL_FIELDS = (
+    "wrong_repair",
+    "reliability_caused_wrong_repair",
+    "completion_claimed",
+    "false_completion",
+    "reliability_caused_false_completion",
+)
+
+
+def _trial_identity(row: dict) -> tuple[str, str, str]:
+    return (row.get("case_id"), row.get("trial_id"), row.get("arm"))
+
+
+def merge_adjudication(records: list[dict], adjudication_rows: list[dict]) -> list[dict]:
+    record_ids = {_trial_identity(row) for row in records}
+    if len(record_ids) != len(records):
+        raise ValueError("duplicate routing trial identity in records")
+    by_identity = {}
+    for row in adjudication_rows:
+        identity = _trial_identity(row)
+        if identity in by_identity:
+            raise ValueError(f"duplicate adjudication identity {identity}")
+        if identity not in record_ids:
+            raise ValueError(f"unknown adjudication trial identity {identity}")
+        for field in ADJUDICATION_BOOL_FIELDS:
+            value = row.get(field)
+            if value is not None and not isinstance(value, bool):
+                raise ValueError(f"{field} must be boolean or null")
+        evidence_ref = row.get("evidence_ref")
+        if evidence_ref is not None and not isinstance(evidence_ref, str):
+            raise ValueError("evidence_ref must be a string or null")
+        by_identity[identity] = row
+    merged = []
+    for record in records:
+        row = dict(record)
+        for field in ADJUDICATION_BOOL_FIELDS:
+            row.setdefault(field, None)
+        row.setdefault("evidence_ref", None)
+        adjudication = by_identity.get(_trial_identity(record))
+        if adjudication is not None:
+            for field in ADJUDICATION_BOOL_FIELDS + ("evidence_ref",):
+                if field in adjudication:
+                    row[field] = adjudication[field]
+        merged.append(row)
+    return merged
+
+
+def _rate_bool(values: list[bool]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _median_number(values: list[float | int]) -> float | None:
+    if not values:
+        return None
+    return float(statistics.median(values))
+
+
+def _post_boundary_mcp_count(row: dict) -> int:
+    total = int(row.get("mcp_intervention_count") or 0)
+    pre = int(row.get("pre_boundary_mcp_call_count") or 0)
+    return max(total - pre, 0)
+
+
+def _post_boundary_skill_selected(row: dict) -> bool:
+    indexes = row.get("skill_activation_indexes")
+    boundary_index = row.get("eligible_boundary_index")
+    if isinstance(indexes, list) and isinstance(boundary_index, int):
+        return any(isinstance(index, int) and index > boundary_index for index in indexes)
+    count = int(row.get("skill_activation_count") or 0)
+    if count == 0:
+        return False
+    if row.get("premature_skill_activation") is True and count == 1:
+        return False
+    return True
+
+
+def _false_activation(row: dict) -> bool:
+    mcp_used = int(row.get("mcp_intervention_count") or 0) > 0
+    if row["arm"] == "S":
+        return int(row.get("skill_activation_count") or 0) > 0 or mcp_used
+    return mcp_used
+
+
+def _validate_score_record(row: dict) -> None:
+    for key in ("case_id", "trial_id"):
+        if not isinstance(row.get(key), str) or not row[key]:
+            raise ValueError(f"{key} must be a non-empty string")
+    if row.get("arm") not in VALID_ARMS:
+        raise ValueError(f"unsupported arm {row.get('arm')!r}")
+    if row.get("lane") not in VALID_LANES:
+        raise ValueError(f"unsupported lane {row.get('lane')!r}")
+    if row.get("group") not in VALID_GROUPS:
+        raise ValueError(f"unsupported group {row.get('group')!r}")
+    if not isinstance(row.get("valid"), bool):
+        raise ValueError("valid must be boolean")
+    for key in ("mcp_intervention_count", "pre_boundary_mcp_call_count", "skill_activation_count"):
+        value = row.get(key, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{key} must be a non-negative integer")
+    if int(row.get("pre_boundary_mcp_call_count") or 0) > int(row.get("mcp_intervention_count") or 0):
+        raise ValueError("pre-boundary count cannot exceed intervention count")
+    for key in ("premature_skill_activation", "s_protocol_bypass"):
+        value = row.get(key, False)
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be boolean")
+    for field in ADJUDICATION_BOOL_FIELDS:
+        value = row.get(field)
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"{field} must be boolean or null")
+    token_usage = row.get("token_usage")
+    if token_usage is not None:
+        total = token_usage.get("total_tokens") if isinstance(token_usage, dict) else None
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            raise ValueError("token_usage.total_tokens must be a non-negative integer")
+
+
+def _lane_metrics(rows: list[dict], arm: str) -> dict:
+    triggers = [row for row in rows if row["group"] == "should_trigger"]
+    negatives = [row for row in rows if row["group"] == "should_not_trigger"]
+    boundaries = [row for row in rows if row["group"] == "boundary"]
+    recall = _rate_bool([_post_boundary_mcp_count(row) > 0 for row in triggers])
+    skill_recall = None
+    if arm == "S":
+        skill_recall = _rate_bool([_post_boundary_skill_selected(row) for row in triggers])
+    false_rate = _rate_bool([_false_activation(row) for row in negatives])
+    post_conditions = [
+        row["post_condition_passed"]
+        for row in rows
+        if isinstance(row.get("post_condition_passed"), bool)
+    ]
+    return {
+        "valid_trial_count": len(rows),
+        "should_trigger_count": len(triggers),
+        "should_not_trigger_count": len(negatives),
+        "boundary_count": len(boundaries),
+        "mcp_intervention_recall": recall,
+        "skill_read_recall": skill_recall,
+        "false_activation_rate": false_rate,
+        "pre_boundary_skill_violation_count": sum(
+            bool(row.get("premature_skill_activation")) for row in rows
+        ),
+        "pre_boundary_mcp_violation_count": sum(
+            int(row.get("pre_boundary_mcp_call_count") or 0) > 0 for row in rows
+        ),
+        "mcp_call_count": sum(int(row.get("mcp_intervention_count") or 0) for row in rows),
+        "median_boundary_to_mcp_ms": _median_number([
+            row["boundary_to_mcp_ms"] for row in rows if isinstance(row.get("boundary_to_mcp_ms"), (int, float))
+        ]),
+        "median_boundary_to_skill_ms": _median_number([
+            row["boundary_to_skill_ms"] for row in rows if isinstance(row.get("boundary_to_skill_ms"), (int, float))
+        ]),
+        "median_turn_duration_ms": _median_number([
+            row["turn_duration_ms"] for row in rows if isinstance(row.get("turn_duration_ms"), (int, float))
+        ]),
+        "deterministic_post_condition_completion_rate": _rate_bool(post_conditions),
+    }
+
+
+def _case_stability(rows: list[dict]) -> list[dict]:
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[(row["case_id"], row["group"])].append(_post_boundary_mcp_count(row) > 0)
+    result = []
+    for (case_id, group), values in sorted(grouped.items()):
+        result.append({
+            "case_id": case_id,
+            "group": group,
+            "trial_count": len(values),
+            "intervention_rate": _rate_bool(values),
+            "stable": len(set(values)) <= 1,
+            "three_repeat_complete": len(values) == 3,
+        })
+    return result
+
+
+def _causal_gate(rows: list[dict], field: str) -> str:
+    relevant = [row for row in rows if int(row.get("mcp_intervention_count") or 0) > 0]
+    if any(row.get(field) is True for row in relevant):
+        return GATE_FAIL
+    if any(row.get(field) is None for row in relevant):
+        return GATE_UNRESOLVED
+    return GATE_PASS
+
+
+def _rate_gate(value: float | None, threshold: float, minimum: bool) -> str:
+    if value is None:
+        return GATE_UNRESOLVED
+    passed = value >= threshold if minimum else value <= threshold
+    return GATE_PASS if passed else GATE_FAIL
+
+
+def _arm_report(rows: list[dict], arm: str) -> dict:
+    arm_rows = [row for row in rows if row["arm"] == arm]
+    valid_rows = [row for row in arm_rows if row["valid"]]
+    invalid_rows = [row for row in arm_rows if not row["valid"]]
+    invalid_reasons = defaultdict(int)
+    for row in invalid_rows:
+        for reason in row.get("invalid_reasons") or ["unspecified"]:
+            invalid_reasons[reason] += 1
+    lane_rows = {
+        lane: [row for row in valid_rows if row["lane"] == lane]
+        for lane in sorted(VALID_LANES)
+    }
+    admission_rows = [row for row in valid_rows if row["lane"] in {"validation", "holdout"}]
+    lanes = {lane: _lane_metrics(lane_rows[lane], arm) for lane in sorted(VALID_LANES)}
+    lanes["admission"] = _lane_metrics(admission_rows, arm)
+    admission = lanes["admission"]
+    trigger_rows = [row for row in valid_rows if row["group"] == "should_trigger"]
+    pre_failure_gate = GATE_UNRESOLVED
+    if trigger_rows:
+        pre_failure_gate = GATE_FAIL if any(int(row.get("pre_boundary_mcp_call_count") or 0) > 0 for row in trigger_rows) else GATE_PASS
+    intervention_rows = [
+        row for row in valid_rows if int(row.get("mcp_intervention_count") or 0) > 0
+    ]
+    wrong_reviewed = sum(
+        row.get("reliability_caused_wrong_repair") is not None for row in intervention_rows
+    )
+    false_reviewed = sum(
+        row.get("reliability_caused_false_completion") is not None for row in intervention_rows
+    )
+    return {
+        "trial_count": len(arm_rows),
+        "valid_trial_count": len(valid_rows),
+        "invalid_trial_count": len(invalid_rows),
+        "invalid_reasons": dict(sorted(invalid_reasons.items())),
+        "boundary_trial_count": sum(row["group"] == "boundary" for row in valid_rows),
+        "lanes": lanes,
+        "case_stability": _case_stability(valid_rows),
+        "s_protocol_bypass_count": (
+            sum(bool(row.get("s_protocol_bypass")) for row in valid_rows) if arm == "S" else 0
+        ),
+        "other_skill_collision_trial_count": sum(
+            bool(row.get("selected_other_skills")) for row in valid_rows
+        ),
+        "adjudication": {
+            "intervention_trial_count": len(intervention_rows),
+            "wrong_repair_causal_reviewed": wrong_reviewed,
+            "false_completion_causal_reviewed": false_reviewed,
+        },
+        "gates": {
+            "pre_failure_mcp": pre_failure_gate,
+            "reliability_caused_wrong_repair": _causal_gate(
+                valid_rows, "reliability_caused_wrong_repair"
+            ),
+            "reliability_caused_false_completion": _causal_gate(
+                valid_rows, "reliability_caused_false_completion"
+            ),
+            "mcp_intervention_recall": _rate_gate(
+                admission["mcp_intervention_recall"], 0.90, True
+            ),
+            "controlled_false_activation": _rate_gate(
+                admission["false_activation_rate"], 0.05, False
+            ),
+        },
+    }
+
+
+def _token_total(row: dict) -> int | None:
+    usage = row.get("token_usage")
+    if not isinstance(usage, dict):
+        return None
+    value = usage.get("total_tokens")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    return value
+
+
+def _paired_idle_token(rows: list[dict]) -> dict:
+    candidates = [
+        row for row in rows
+        if row["valid"]
+        and row["group"] == "should_not_trigger"
+        and row["lane"] in {"validation", "holdout"}
+    ]
+    pairs = defaultdict(dict)
+    for row in candidates:
+        pairs[(row["case_id"], row["trial_id"])][row["arm"]] = row
+    matched = [arms for arms in pairs.values() if set(arms) == {"S", "M"}]
+    percentages = []
+    for arms in matched:
+        s_total = _token_total(arms["S"])
+        m_total = _token_total(arms["M"])
+        if s_total is None or m_total is None or m_total == 0:
+            continue
+        percentages.append((s_total - m_total) / m_total * 100.0)
+    eligible_count = len(matched)
+    scorable_count = len(percentages)
+    coverage = scorable_count / eligible_count if eligible_count else None
+    median_pct = _median_number(percentages)
+    gate = GATE_UNRESOLVED
+    if coverage is not None and coverage >= 0.90 and median_pct is not None:
+        gate = GATE_PASS if median_pct <= 2.0 else GATE_FAIL
+    return {
+        "eligible_pair_count": eligible_count,
+        "scorable_pair_count": scorable_count,
+        "coverage": coverage,
+        "median_s_minus_m_pct": median_pct,
+        "gate_state": gate,
+    }
+
+
+def score_records(records: list[dict]) -> dict:
+    if not records:
+        raise ValueError("at least one routing-eval record is required")
+    seen = set()
+    for row in records:
+        _validate_score_record(row)
+        identity = _trial_identity(row)
+        if identity in seen:
+            raise ValueError(f"duplicate routing trial identity {identity}")
+        seen.add(identity)
+    arms = {arm: _arm_report(records, arm) for arm in sorted(VALID_ARMS)}
+    return {
+        "schema_version": 1,
+        "record_count": len(records),
+        "arms": arms,
+        "paired_idle_token": _paired_idle_token(records),
+        "production_shadow": {
+            "gate_state": "NOT_MEASURED",
+            "false_activation_limit_per_100_turns": 1.0,
+        },
+    }
