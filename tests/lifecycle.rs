@@ -43,6 +43,13 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
         .iter()
         .find(|tool| tool.name == "inspect_environment")
         .context("inspect tool")?;
+    let inspect_description = inspect_tool.description.as_deref().context("inspect description")?;
+    assert!(inspect_description.contains("only when shell, cwd, PATH, or executable identity can causally matter"));
+    assert!(inspect_description.contains("Do not call for a pure command/post-condition disagreement"));
+    let inspect_annotations = inspect_tool.annotations.as_ref().context("inspect annotations")?;
+    assert_eq!(inspect_annotations.read_only_hint, Some(true));
+    assert_eq!(inspect_annotations.open_world_hint, Some(false));
+
     let inspect_output_schema = serde_json::Value::Object(
         inspect_tool.output_schema.as_ref().context("inspect output schema")?.as_ref().clone(),
     );
@@ -53,6 +60,11 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
         .iter()
         .find(|tool| tool.name == "diagnose_failure")
         .context("diagnose tool")?;
+    let diagnose_description = diagnose_tool.description.as_deref().context("diagnose description")?;
+    assert!(diagnose_description.contains("Does not inspect the environment"));
+    let diagnose_annotations = diagnose_tool.annotations.as_ref().context("diagnose annotations")?;
+    assert_eq!(diagnose_annotations.read_only_hint, Some(true));
+    assert_eq!(diagnose_annotations.open_world_hint, Some(false));
     let diagnose_schema = serde_json::Value::Object(diagnose_tool.input_schema.as_ref().clone());
     assert!(
         !diagnose_schema["properties"]["observed_shell"]
@@ -73,6 +85,11 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
         .iter()
         .find(|tool| tool.name == "verify_result")
         .context("verify tool")?;
+    let verify_description = verify_tool.description.as_deref().context("verify description")?;
+    assert!(verify_description.contains("final deterministic post-condition verification"));
+    let verify_annotations = verify_tool.annotations.as_ref().context("verify annotations")?;
+    assert_eq!(verify_annotations.read_only_hint, Some(true));
+    assert_eq!(verify_annotations.open_world_hint, Some(false));
     let verify_schema = serde_json::Value::Object(verify_tool.input_schema.as_ref().clone());
     assert_eq!(
         verify_schema["properties"]["mode"]["enum"],

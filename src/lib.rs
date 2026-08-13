@@ -29,7 +29,8 @@ where
 impl PsrServer {
     #[tool(
         name = "inspect_environment",
-        description = "Return privacy-bounded shell/cwd/PATH/executable identity for a failed Windows task."
+        description = "Use after a failed Windows task only when shell, cwd, PATH, or executable identity can causally matter. Do not call for a pure command/post-condition disagreement or known-good success. Return privacy-bounded identity only.",
+        annotations(title = "Inspect Windows execution identity", read_only_hint = true, open_world_hint = false)
     )]
     async fn inspect_environment(
         &self,
@@ -39,7 +40,8 @@ impl PsrServer {
     }
     #[tool(
         name = "diagnose_failure",
-        description = "Classify bounded Windows/PowerShell failure evidence and return one conservative next action."
+        description = "Classify bounded Windows/PowerShell failure evidence and return one conservative next action. Does not inspect the environment; supply only facts already observed at the failed boundary.",
+        annotations(title = "Diagnose Windows execution failure", read_only_hint = true, open_world_hint = false)
     )]
     fn diagnose_failure(
         &self,
@@ -50,7 +52,8 @@ impl PsrServer {
 
     #[tool(
         name = "verify_result",
-        description = "Evaluate explicit deterministic post-conditions independently from command exit status."
+        description = "Perform final deterministic post-condition verification independently from command exit status. Use against frozen task criteria, not as an exploratory retry loop.",
+        annotations(title = "Verify deterministic task outcome", read_only_hint = true, open_world_hint = false)
     )]
     async fn verify_result(
         &self,
