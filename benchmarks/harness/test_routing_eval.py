@@ -12,7 +12,7 @@ def _case(case_id="R01", group="should_trigger", lane="train"):
         "lane": lane,
         "group": group,
         "title": "paired fixture",
-        "prompt": "Work only in the current workspace.\n[CASE-ID: {case_key}]",
+        "prompt": "Do the task.\n[CASE-ID: {case_key}]",
         "files": {
             "task.ps1": "exit 7\n",
             "nested/input.txt": "same fixture\n",
@@ -499,3 +499,71 @@ class RoutingEvalScoringTests(unittest.TestCase):
         gates = routing_eval.score_records([record])["arms"]["M"]["gates"]
         self.assertEqual(gates["reliability_caused_wrong_repair"], "PASS")
         self.assertEqual(gates["reliability_caused_false_completion"], "PASS")
+
+
+import contextlib
+import io
+
+
+class RoutingEvalCliTests(unittest.TestCase):
+    def test_status_reports_invalid_remaining_and_next_pointers(self):
+        manifest = [
+            {"case_id": "R30", "trial_id": "T01", "arm": "S", "sequence": 1, "prompt_path": "p1", "workspace": "w1"},
+            {"case_id": "R30", "trial_id": "T01", "arm": "M", "sequence": 2, "prompt_path": "p1", "workspace": "w2"},
+        ]
+        records = [{"case_id": "R30", "trial_id": "T01", "arm": "S", "valid": False}]
+        status = routing_eval.collection_status(manifest, records)
+        self.assertEqual(status["expected_trials"], 2)
+        self.assertEqual(status["collected_trials"], 1)
+        self.assertEqual(status["invalid_trials"], 1)
+        self.assertEqual(status["remaining_trials"], 1)
+        self.assertEqual(status["next_prompt_path"], "p1")
+        self.assertEqual(status["next_workspace"], "w2")
+
+    def test_collect_malformed_input_returns_two_and_writes_no_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            manifest = root / "manifest.jsonl"
+            manifest.write_text('{"case_id":', encoding="utf-8")
+            output = root / "records.jsonl"
+            report = root / "report.json"
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                exit_code = routing_eval.main([
+                    "collect", "--manifest", str(manifest),
+                    "--sessions-root", str(root), "--output", str(output),
+                    "--report", str(report),
+                ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn("error", json.loads(stream.getvalue()))
+        self.assertFalse(output.exists())
+        self.assertFalse(report.exists())
+
+
+class RoutingEvalEndToEndTests(unittest.TestCase):
+    def test_prepare_collect_score_synthetic_two_case_campaign(self):
+        trigger_case = _case("R31", lane="validation")
+        negative_case = _case("R32", group="should_not_trigger", lane="validation")
+        negative_case["boundary_detector"] = {"kind": "none"}
+        negative_case["expected_first_command_fragment"] = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            campaign = root / "campaign"
+            manifest = routing_eval.prepare_campaign([trigger_case, negative_case], campaign, trials=1, seed=3)
+            sessions = root / "sessions"
+            sessions.mkdir()
+            for row in manifest:
+                workspace = pathlib.Path(row["workspace"])
+                rollout = _base_rollout(row["case_key"], workspace, skill_visible=row["arm"] == "S")
+                if row["group"] == "should_trigger":
+                    rollout += _failed_command_rows()
+                    if row["arm"] == "S":
+                        rollout += [_skill_row()]
+                    rollout += [_mcp_row()]
+                routing_eval.trigger_eval.write_jsonl(sessions / f"rollout-{row['sequence']:02d}.jsonl", rollout)
+            records = routing_eval.collect_rollouts(sessions, manifest)
+            report = routing_eval.score_records(records)
+        self.assertEqual(len(records), 4)
+        self.assertEqual(set(report["arms"]), {"S", "M"})
+        self.assertEqual(report["arms"]["S"]["gates"]["mcp_intervention_recall"], "PASS")
+        self.assertEqual(report["arms"]["M"]["gates"]["mcp_intervention_recall"], "PASS")

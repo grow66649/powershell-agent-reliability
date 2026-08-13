@@ -767,3 +767,98 @@ def score_records(records: list[dict]) -> dict:
             "false_activation_limit_per_100_turns": 1.0,
         },
     }
+
+
+def load_cases(path: pathlib.Path) -> list[dict]:
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(value, list) or not value:
+        raise ValueError("cases file must contain a non-empty JSON array")
+    seen = set()
+    for case in value:
+        if not isinstance(case, dict):
+            raise ValueError("each routing case must be an object")
+        _validate_case(case)
+        if case["case_id"] in seen:
+            raise ValueError(f"duplicate case_id {case['case_id']}")
+        seen.add(case["case_id"])
+    return value
+
+
+def collection_status(manifest: list[dict], records: list[dict]) -> dict:
+    collected = {_trial_identity(row) for row in records}
+    ordered = sorted(manifest, key=lambda row: row.get("sequence") or 0)
+    remaining = [row for row in ordered if _trial_identity(row) not in collected]
+    next_row = remaining[0] if remaining else None
+    return {
+        "expected_trials": len(manifest),
+        "collected_trials": len(records),
+        "invalid_trials": sum(row.get("valid") is False for row in records),
+        "remaining_trials": len(remaining),
+        "next_prompt_path": next_row.get("prompt_path") if next_row else None,
+        "next_workspace": next_row.get("workspace") if next_row else None,
+        "next_case_key": next_row.get("case_key") if next_row else None,
+        "next_arm": next_row.get("arm") if next_row else None,
+    }
+
+
+def _write_report(path: pathlib.Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Prepare, collect, and score two-arm Codex Desktop routing trials")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    prepare = sub.add_parser("prepare")
+    prepare.add_argument("--cases", type=pathlib.Path, required=True)
+    prepare.add_argument("--output-root", type=pathlib.Path, required=True)
+    prepare.add_argument("--trials", type=int, default=3)
+    prepare.add_argument("--seed", type=int, default=20260813)
+
+    collect = sub.add_parser("collect")
+    collect.add_argument("--manifest", type=pathlib.Path, required=True)
+    collect.add_argument("--sessions-root", type=pathlib.Path, required=True)
+    collect.add_argument("--output", type=pathlib.Path, required=True)
+    collect.add_argument("--report", type=pathlib.Path)
+
+    score = sub.add_parser("score")
+    score.add_argument("--records", type=pathlib.Path, required=True)
+    score.add_argument("--adjudication", type=pathlib.Path)
+    score.add_argument("--report", type=pathlib.Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "prepare":
+            manifest = prepare_campaign(load_cases(args.cases), args.output_root, args.trials, args.seed)
+            result = {
+                "prepared_trials": len(manifest),
+                "manifest": str(args.output_root / "manifest.jsonl"),
+            }
+        elif args.command == "collect":
+            manifest = trigger_eval.load_jsonl(args.manifest)
+            records = collect_rollouts(args.sessions_root, manifest)
+            result = {
+                "status": collection_status(manifest, records),
+                "score": score_records(records) if records else None,
+            }
+            trigger_eval.write_jsonl(args.output, records)
+            if args.report:
+                _write_report(args.report, result)
+        else:
+            records = trigger_eval.load_jsonl(args.records)
+            merged = records
+            if args.adjudication:
+                adjudication = trigger_eval.load_jsonl(args.adjudication)
+                merged = merge_adjudication(records, adjudication)
+            result = score_records(merged)
+            if args.report:
+                _write_report(args.report, result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
