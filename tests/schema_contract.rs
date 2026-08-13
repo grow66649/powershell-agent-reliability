@@ -1,7 +1,7 @@
 use powershell_agent_reliability::{
-    diagnosis::DiagnoseFailureRequest,
-    environment::InspectEnvironmentRequest,
-    verification::VerifyResultRequest,
+    diagnosis::{DiagnoseFailureRequest, DiagnosisResult},
+    environment::{EnvironmentDigest, InspectEnvironmentRequest},
+    verification::{VerificationResult, VerifyResultRequest},
 };
 use schemars::schema_for;
 
@@ -69,6 +69,24 @@ fn tool_input_schema_inlines_nested_agent_arguments() {
         check_items["oneOf"][3]["properties"]["expected_sha256"]["type"],
         "string"
     );
+}
+
+#[test]
+fn tool_output_schema_inlines_nested_agent_results() {
+    use rmcp::handler::server::tool::schema_for_output;
+
+    let diagnosis = serde_json::Value::Object(schema_for_output::<DiagnosisResult>().as_ref().clone());
+    assert!(!diagnosis["properties"]["evidence"]["items"].to_string().contains("\"$ref\""));
+    assert_eq!(diagnosis["properties"]["evidence"]["items"]["properties"]["code"]["type"], "string");
+    assert!(!diagnosis["properties"]["next_action"].to_string().contains("\"$ref\""));
+
+    let environment = serde_json::Value::Object(schema_for_output::<EnvironmentDigest>().as_ref().clone());
+    assert!(!environment["properties"]["cwd"].to_string().contains("\"$ref\""));
+    assert!(!environment["properties"]["critical_executables"]["items"].to_string().contains("\"$ref\""));
+
+    let verification = serde_json::Value::Object(schema_for_output::<VerificationResult>().as_ref().clone());
+    assert!(!verification["properties"]["checks"]["items"].to_string().contains("\"$ref\""));
+    assert_eq!(verification["properties"]["checks"]["items"]["properties"]["passed"]["type"], "boolean");
 }
 
 #[test]

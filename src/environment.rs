@@ -45,6 +45,7 @@ pub struct EnvironmentDigest {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct ShellIdentity {
     pub family: String,
     pub version: Option<String>,
@@ -54,18 +55,21 @@ pub struct ShellIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct OsIdentity {
     pub family: String,
     pub build: Option<String>,
     pub process_architecture: String,
 }
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct CwdIdentity {
     pub exists: bool,
     pub normalized_path_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct ExecutableIdentity {
     pub name: String,
     pub resolution_status: String,
@@ -77,6 +81,7 @@ pub struct ExecutableIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct EnvDeltaDigest {
     pub key: String,
     pub value_sha256: String,

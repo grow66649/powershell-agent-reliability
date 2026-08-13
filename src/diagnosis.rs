@@ -77,12 +77,14 @@ pub struct DiagnosisResult {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct DiagnosisEvidence {
     pub code: String,
     pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct DiagnosisAction {
     pub kind: String,
     pub guidance: String,

@@ -39,6 +39,16 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
     names.sort();
     assert_eq!(names, ["diagnose_failure", "inspect_environment", "verify_result"]);
 
+    let inspect_tool = tools
+        .iter()
+        .find(|tool| tool.name == "inspect_environment")
+        .context("inspect tool")?;
+    let inspect_output_schema = serde_json::Value::Object(
+        inspect_tool.output_schema.as_ref().context("inspect output schema")?.as_ref().clone(),
+    );
+    assert!(!inspect_output_schema["properties"]["cwd"].to_string().contains("\"$ref\""));
+    assert!(!inspect_output_schema["properties"]["critical_executables"]["items"].to_string().contains("\"$ref\""));
+
     let diagnose_tool = tools
         .iter()
         .find(|tool| tool.name == "diagnose_failure")
@@ -53,6 +63,11 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
         diagnose_schema["properties"]["observed_shell"]["properties"]["family"]["type"],
         "string"
     );
+    let diagnose_output_schema = serde_json::Value::Object(
+        diagnose_tool.output_schema.as_ref().context("diagnose output schema")?.as_ref().clone(),
+    );
+    assert!(!diagnose_output_schema["properties"]["evidence"]["items"].to_string().contains("\"$ref\""));
+    assert!(!diagnose_output_schema["properties"]["next_action"].to_string().contains("\"$ref\""));
 
     let verify_tool = tools
         .iter()
@@ -73,6 +88,11 @@ async fn stdio_server_completes_mcp_lifecycle() -> Result<()> {
             ["expected_sha256"]["type"],
         "string"
     );
+    let verify_output_schema = serde_json::Value::Object(
+        verify_tool.output_schema.as_ref().context("verify output schema")?.as_ref().clone(),
+    );
+    assert!(!verify_output_schema["properties"]["checks"]["items"].to_string().contains("\"$ref\""));
+    assert_eq!(verify_output_schema["properties"]["checks"]["items"]["properties"]["passed"]["type"], "boolean");
 
     let inspect_arguments = serde_json::from_value(json!({
         "critical_executables": [],

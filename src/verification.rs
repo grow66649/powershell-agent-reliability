@@ -77,6 +77,7 @@ pub struct VerificationResult {
     pub checks: Vec<VerificationCheckResult>,
 }
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct VerificationCheckResult {
     pub index: u32,
     pub kind: String,
