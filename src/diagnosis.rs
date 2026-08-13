@@ -217,7 +217,7 @@ pub fn diagnose_failure(request: DiagnoseFailureRequest) -> Result<DiagnosisResu
         "insufficient_specific_evidence",
         "The supplied facts do not support a safer specific classification.",
         "collect_minimal_evidence",
-        "Collect only the missing shell/cwd/resolution/exit/post-condition facts tied to the failed boundary, then classify again.",
+        "Collect one missing shell/cwd/resolution/exit/post-condition fact tied to the failed boundary, then classify again.",
     ))
 }
 fn command_task_outcome_disagree(request: &DiagnoseFailureRequest) -> bool {

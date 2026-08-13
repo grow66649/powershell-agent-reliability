@@ -16,7 +16,7 @@ Keep Codex Desktop/app-server as the command and process owner. Use Reliability 
 5. Call `inspect_environment` only when shell, cwd, PATH resolution, or executable identity can causally matter to the observed failure.
 6. Keep probe/helper failures separate from the original task failure unless the probe is itself the failed task boundary.
 7. Call `diagnose_failure` once per failure boundary with bounded structured facts. After a high-confidence diagnosis, do not add unrelated probes.
-8. If diagnosis is `UNKNOWN`, collect only one explicitly missing fact identified by the diagnosis, then make at most one re-diagnosis.
+8. If diagnosis is `UNKNOWN`, collect only one missing fact tied to the failed boundary, then make at most one re-diagnosis.
 9. Perform at most one evidence-backed repair through Codex Desktop's normal tools. If the frozen criteria still fail, stop and report failure; do not perform a second repair in the same Reliability intervention.
 10. After repair, perform exactly one `verify_result` against the frozen criteria before claiming completion.
 11. Never weaken criteria after a failed verification. Never derive expected values from repaired candidate output. Keep command success and task success separate.

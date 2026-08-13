@@ -107,6 +107,7 @@ fn ambiguous_evidence_stays_unknown() {
     let diagnosis = diagnose_failure(base()).expect("unknown diagnosis");
     assert_eq!(diagnosis.failure_class, "UNKNOWN");
     assert_eq!(diagnosis.confidence, "low");
+    assert!(diagnosis.next_action.guidance.contains("one missing"));
 }
 #[test]
 fn post_condition_without_command_exit_does_not_invent_command_failure() {
