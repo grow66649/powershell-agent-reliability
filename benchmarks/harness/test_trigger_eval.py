@@ -1,0 +1,167 @@
+import json
+import pathlib
+import tempfile
+import unittest
+
+import trigger_eval
+
+
+def _row(record_type, payload, timestamp="2026-08-13T00:00:00Z"):
+    return {"timestamp": timestamp, "type": record_type, "payload": payload}
+
+
+class TriggerEvalRolloutTests(unittest.TestCase):
+    def test_extracts_skill_selection_after_first_failed_command(self):
+        rows = [
+            _row("session_meta", {"session_id": "s1", "originator": "Codex Desktop", "cli_version": "x"}),
+            _row("turn_context", {"model": "gpt-test", "effort": "max", "approval_policy": "never", "sandbox_policy": {"type": "danger-full-access"}}),
+            _row("world_state", {"state": {"host_skills": {"body": "- powershell-reliability: candidate"}}}),
+            _row("event_msg", {"type": "user_message", "message": "Do the task.\n[CASE-ID: C01-T01]"}),
+            _row("response_item", {"type": "custom_tool_call", "call_id": "cmd1", "name": "exec", "input": "tools.shell_command({command:'pwsh.exe -NoProfile -File .\\task.ps1'})"}),
+            _row("response_item", {"type": "custom_tool_call_output", "call_id": "cmd1", "output": [{"type": "input_text", "text": "Exit code: 7"}]}),
+            _row("response_item", {"type": "custom_tool_call", "call_id": "skill1", "name": "exec", "input": "Get-Content C:\\Users\\u\\.codex\\skills\\powershell-reliability\\SKILL.md -Raw"}),
+            _row("response_item", {"type": "custom_tool_call", "call_id": "mcp1", "name": "exec", "input": "tools.mcp__psr_reliability_native__diagnose_failure({exit_code:7})"}),
+        ]
+        record = trigger_eval.extract_rollout(rows, pathlib.Path("rollout.jsonl"))
+        self.assertEqual(record["case_key"], "C01-T01")
+        self.assertTrue(record["psr_skill_selected"])
+        self.assertFalse(record["psr_skill_selected_before_first_command"])
+        self.assertEqual(record["reliability_mcp_calls"], 1)
+        self.assertEqual(record["first_command_exit_code"], 7)
+
+    def test_flags_skill_selection_before_first_command(self):
+        rows = [
+            _row("session_meta", {"session_id": "s2"}),
+            _row("event_msg", {"type": "user_message", "message": "Try it.\n[CASE-ID: C02-T01]"}),
+            _row("response_item", {"type": "custom_tool_call", "call_id": "skill1", "name": "exec", "input": "Get-Content C:\\Users\\u\\.codex\\skills\\powershell-reliability\\SKILL.md -Raw"}),
+            _row("response_item", {"type": "custom_tool_call", "call_id": "cmd1", "name": "exec", "input": "tools.shell_command({command:'pwsh.exe -NoProfile -File .\\task.ps1'})"}),
+        ]
+        record = trigger_eval.extract_rollout(rows, pathlib.Path("r.jsonl"))
+        self.assertTrue(record["psr_skill_selected_before_first_command"])
+        self.assertEqual(record["reliability_mcp_calls_before_first_command"], 0)
+
+    def test_records_other_skill_reads_as_collisions(self):
+        rows = [
+            _row("session_meta", {"session_id": "s3"}),
+            _row("event_msg", {"type": "user_message", "message": "Explain it.\n[CASE-ID: C11-T01]"}),
+            _row("response_item", {"type": "custom_tool_call", "call_id": "s1", "name": "exec", "input": "Get-Content C:\\Users\\u\\.codex\\skills\\concise-planning\\SKILL.md -Raw"}),
+        ]
+        record = trigger_eval.extract_rollout(rows, pathlib.Path("r.jsonl"))
+        self.assertFalse(record["psr_skill_selected"])
+        self.assertEqual(record["selected_other_skills"], ["concise-planning"])
+
+
+class TriggerEvalScoringTests(unittest.TestCase):
+    def test_scores_recall_false_positive_stability_and_timing(self):
+        records = [
+            {"case_id": "C01", "trial_id": "T01", "group": "should_trigger", "psr_skill_selected": True, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 1, "selected_other_skills": []},
+            {"case_id": "C01", "trial_id": "T02", "group": "should_trigger", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": []},
+            {"case_id": "C11", "trial_id": "T01", "group": "should_not_trigger", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": []},
+            {"case_id": "C12", "trial_id": "T01", "group": "should_not_trigger", "psr_skill_selected": True, "psr_skill_selected_before_first_command": True, "reliability_mcp_calls": 1, "selected_other_skills": ["other-skill"]},
+            {"case_id": "C21", "trial_id": "T01", "group": "boundary", "psr_skill_selected": True, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": []},
+        ]
+        report = trigger_eval.score_records(records)
+        self.assertEqual(report["implicit_should_trigger"]["selection_recall"], 0.5)
+        self.assertEqual(report["implicit_should_not_trigger"]["false_positive_rate"], 0.5)
+        self.assertEqual(report["implicit_overall"]["pre_first_attempt_selection_violations"], 1)
+        self.assertEqual(report["implicit_overall"]["collision_trial_count"], 1)
+        self.assertEqual(report["boundary"]["trial_count"], 1)
+
+    def test_rejects_duplicate_case_trial_records(self):
+        record = {"case_id": "C01", "trial_id": "T01", "group": "should_trigger", "psr_skill_selected": True, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": []}
+        with self.assertRaises(ValueError):
+            trigger_eval.score_records([record, dict(record)])
+
+
+class TriggerEvalCampaignTests(unittest.TestCase):
+    def test_prepare_campaign_creates_three_trials_per_case(self):
+        cases = [
+            {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Run in {workspace}.\n[CASE-ID: {case_key}]", "files": {"task.ps1": "exit 7\n"}, "expected_first_command_fragment": "pwsh.exe -NoProfile -File .\\task.ps1"},
+            {"case_id": "C11", "group": "should_not_trigger", "title": "explain", "prompt": "Explain Get-ChildItem.\n[CASE-ID: {case_key}]", "files": {}},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            manifest = trigger_eval.prepare_campaign(cases, root, trials=3, seed=7)
+            self.assertEqual(len(manifest), 6)
+            self.assertEqual(len({row["case_key"] for row in manifest}), 6)
+            self.assertTrue((root / "manifest.jsonl").is_file())
+            self.assertEqual(len(list((root / "prompts").glob("*.txt"))), 6)
+            self.assertTrue(any((root / "workspaces" / row["case_key"] / "task.ps1").is_file() for row in manifest if row["case_id"] == "C01"))
+
+    def test_attach_manifest_labels_collected_records(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": "pwsh.exe"}]
+        record = {"case_key": "C01-T01", "psr_skill_selected": True, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 1, "selected_other_skills": [], "first_command_input": "tools.shell_command pwsh.exe"}
+        attached = trigger_eval.attach_manifest([record], manifest)
+        self.assertEqual(attached[0]["group"], "should_trigger")
+        self.assertTrue(attached[0]["first_command_matches_expectation"])
+
+
+
+class TriggerEvalDatasetContractTests(unittest.TestCase):
+    def test_repository_dataset_has_balanced_implicit_groups(self):
+        cases_path = pathlib.Path(__file__).resolve().parents[1] / "trigger_eval" / "cases.json"
+        cases = trigger_eval.load_cases(cases_path)
+        counts = {group: sum(case["group"] == group for case in cases) for group in trigger_eval.VALID_GROUPS}
+        self.assertEqual(len(cases), 25)
+        self.assertEqual(counts, {"should_trigger": 10, "should_not_trigger": 10, "boundary": 5})
+        for case in cases:
+            lower = case["prompt"].lower()
+            self.assertNotIn("powershell-reliability", lower)
+            self.assertNotIn("load the skill", lower)
+            self.assertIn("[case-id: {case_key}]", lower)
+
+
+class TriggerEvalEnvironmentTests(unittest.TestCase):
+    def test_score_flags_model_or_effort_drift(self):
+        base = {"group": "should_not_trigger", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": [], "psr_available_in_catalog": True, "cli_version": "0.1", "approval_policy": "never", "sandbox_type": "danger-full-access"}
+        first = dict(base, case_id="C11", trial_id="T01", model="gpt-a", effort="max")
+        second = dict(base, case_id="C12", trial_id="T01", model="gpt-b", effort="max")
+        report = trigger_eval.score_records([first, second])
+        self.assertFalse(report["environment_consistency"]["constant"])
+        self.assertEqual(report["environment_consistency"]["model"], ["gpt-a", "gpt-b"])
+
+
+class TriggerEvalPrivacyTests(unittest.TestCase):
+    def test_manifest_attachment_removes_raw_command_text(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": "pwsh.exe"}]
+        record = {"case_key": "C01-T01", "psr_skill_selected": True, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 1, "selected_other_skills": [], "first_command_input": "tools.shell_command({command:'pwsh.exe secret-path'})"}
+        attached = trigger_eval.attach_manifest([record], manifest)[0]
+        self.assertNotIn("first_command_input", attached)
+        self.assertRegex(attached["first_command_input_sha256"], r"^[0-9A-F]{64}$")
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TriggerEvalLiteralPromptTests(unittest.TestCase):
+    def test_prepare_campaign_preserves_literal_braces_in_prompt(self):
+        cases = [{"case_id": "C99", "group": "boundary", "title": "brace", "prompt": "Explain token '}' and use {workspace}.\n[CASE-ID: {case_key}]", "files": {}}]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = trigger_eval.prepare_campaign(cases, pathlib.Path(temp_dir), trials=1, seed=1)
+        self.assertIn("token '}'", manifest[0]["prompt"])
+        self.assertIn("C99-T01", manifest[0]["prompt"])
+
+
+class TriggerEvalCollectorRobustnessTests(unittest.TestCase):
+    def test_collect_ignores_invalid_unrelated_rollout_files(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": "pwsh.exe", "sequence": 1}]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            (root / "rollout-bad.jsonl").write_text('{"type":"event_msg","payload":"unterminated', encoding="utf-8")
+            records = trigger_eval.collect_rollouts(root, manifest)
+        self.assertEqual(records, [])
+
+
+class TriggerEvalCampaignOrderingTests(unittest.TestCase):
+    def test_prepare_campaign_stratifies_repetitions_by_round(self):
+        cases = [
+            {"case_id": f"C{i:02d}", "group": "boundary", "title": str(i), "prompt": "Do it.\n[CASE-ID: {case_key}]", "files": {}}
+            for i in range(1, 6)
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = trigger_eval.prepare_campaign(cases, pathlib.Path(temp_dir), trials=3, seed=11)
+        first_round = manifest[:5]
+        second_round = manifest[5:10]
+        self.assertEqual({row["case_id"] for row in first_round}, {f"C{i:02d}" for i in range(1, 6)})
+        self.assertEqual({row["trial_id"] for row in first_round}, {"T01"})
+        self.assertEqual({row["trial_id"] for row in second_round}, {"T02"})
