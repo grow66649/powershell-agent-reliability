@@ -87,6 +87,21 @@ fn classifies_quoting_native_and_desktop_boundaries() {
     assert_eq!(sandbox.failure_class, "DESKTOP_SANDBOX_BOUNDARY");
 }
 
+fn assert_specific_with_mismatch(request: DiagnoseFailureRequest, expected: &str) {
+    let diagnosis = diagnose_failure(request).expect("specific diagnosis");
+    assert_eq!(diagnosis.failure_class, expected);
+    assert!(diagnosis.evidence.iter().any(|item| item.code == "command_task_outcome_disagree"));
+}
+
+#[test]
+fn specific_causal_evidence_outranks_command_task_mismatch() {
+    assert_specific_with_mismatch(DiagnoseFailureRequest { exit_code: Some(0), post_condition: Some(false), resolution_before_sha256: Some("a".repeat(64)), resolution_after_sha256: Some("b".repeat(64)), ..base() }, "ENVIRONMENT_STALENESS");
+    assert_specific_with_mismatch(DiagnoseFailureRequest { exit_code: Some(0), post_condition: Some(false), expected_cwd_sha256: Some("c".repeat(64)), actual_cwd_sha256: Some("d".repeat(64)), ..base() }, "CWD_PATH_IDENTITY");
+    assert_specific_with_mismatch(DiagnoseFailureRequest { exit_code: Some(0), post_condition: Some(false), required_shell: Some(ShellRequirement { family: "PowerShell".to_owned(), minimum_major: Some(7), minimum_minor: Some(0) }), observed_shell: Some(ShellObservation { family: "WindowsPowerShell".to_owned(), major: Some(5), minor: Some(1) }), ..base() }, "SHELL_VERSION_MISMATCH");
+    assert_specific_with_mismatch(DiagnoseFailureRequest { exit_code: Some(0), post_condition: Some(false), parser_or_binding_failure: true, nested_command_boundary: true, literal_dollar_expected: true, ..base() }, "QUOTING_EXPANSION");
+    assert_specific_with_mismatch(DiagnoseFailureRequest { exit_code: Some(7), post_condition: Some(true), native_process: true, ..base() }, "NATIVE_PROCESS_OUTCOME");
+}
+
 #[test]
 fn ambiguous_evidence_stays_unknown() {
     let diagnosis = diagnose_failure(base()).expect("unknown diagnosis");

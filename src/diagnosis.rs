@@ -94,100 +94,86 @@ pub fn diagnose_failure(request: DiagnoseFailureRequest) -> Result<DiagnosisResu
     validate_request(&request)?;
 
     if request.desktop_sandbox_signal {
-        return Ok(result(
+        return Ok(with_command_task_evidence(result(
             "DESKTOP_SANDBOX_BOUNDARY",
             "high",
             "desktop_sandbox_signal",
             "Caller supplied an explicit Desktop/sandbox boundary signal.",
             "inspect_desktop_boundary",
             "Keep the failure attributed to the Desktop/sandbox boundary; do not weaken ACLs, sandboxing, approvals, or global security settings.",
-        ));
+        ), &request));
     }
     if request.timed_out {
-        return Ok(result(
+        return Ok(with_command_task_evidence(result(
             "TIMEOUT_CANCELLATION",
             "high",
             "timed_out",
             "The observed command boundary reported a timeout.",
             "verify_timeout_owner",
             "Identify which layer timed out, verify the owned process state, and keep timeout/cancellation separate from task completion.",
-        ));
-    }
-
-    if let (Some(exit_code), Some(post_condition)) = (request.exit_code, request.post_condition) {
-        let command_succeeded = exit_code == 0;
-        if command_succeeded != post_condition {
-            return Ok(result(
-                "POST_CONDITION_MISMATCH",
-                "high",
-                "command_task_outcome_disagree",
-                "Command exit status and the explicit task post-condition disagree.",
-                "trust_post_condition_separately",
-                "Preserve both facts. Do not infer task completion from exit code alone; inspect the failed or satisfied post-condition before any repair.",
-            ));
-        }
+        ), &request));
     }
 
     if hashes_differ(
         request.resolution_before_sha256.as_deref(),
         request.resolution_after_sha256.as_deref(),
     ) {
-        return Ok(result(
+        return Ok(with_command_task_evidence(result(
             "ENVIRONMENT_STALENESS",
             "high",
             "critical_resolution_changed",
             "A declared critical executable resolved to a different identity across an environment boundary.",
             "refresh_environment_digest",
             "Recompute the bounded environment digest and reason from the new executable identity instead of reusing stale resolution assumptions.",
-        ));
+        ), &request));
     }
     if hashes_differ(
         request.expected_cwd_sha256.as_deref(),
         request.actual_cwd_sha256.as_deref(),
     ) {
-        return Ok(result(
+        return Ok(with_command_task_evidence(result(
             "CWD_PATH_IDENTITY",
             "high",
             "cwd_identity_mismatch",
             "Expected and observed working-directory identities differ.",
             "bind_cwd_explicitly",
             "Bind the intended working directory explicitly and re-evaluate relative paths against that identity before searching or moving files.",
-        ));
+        ), &request));
     }
 
     if shell_mismatch(request.required_shell.as_ref(), request.observed_shell.as_ref()) {
-        return Ok(result(
+        return Ok(with_command_task_evidence(result(
             "SHELL_VERSION_MISMATCH",
             "high",
             "shell_requirement_mismatch",
             "The observed shell family/version does not satisfy the declared requirement.",
             "select_compatible_shell",
             "Use a shell that satisfies the declared capability requirement or choose syntax supported by the observed shell; do not retry unchanged across shell families.",
-        ));
+        ), &request));
     }
 
     if request.parser_or_binding_failure
         && request.nested_command_boundary
         && request.literal_dollar_expected
     {
-        return Ok(result(
+        return Ok(with_command_task_evidence(result(
             "QUOTING_EXPANSION",
             "high",
             "nested_literal_expansion_risk",
             "A parser/binding failure occurred across a nested command boundary where a literal dollar token was expected.",
             "replace_nested_string_boundary",
             "Prefer structured argv for native commands or an explicit PowerShell script boundary instead of adding a universal escape rule.",
-        ));
+        ), &request));
     }
     if stderr_indicates_desktop_boundary(request.stderr_excerpt.as_deref()) {
-        return Ok(result(
+        return Ok(with_command_task_evidence(result(
             "DESKTOP_SANDBOX_BOUNDARY",
             "medium",
             "stderr_desktop_boundary_pattern",
             "The bounded stderr excerpt contains a known access/sandbox boundary pattern.",
             "confirm_desktop_boundary",
             "Confirm the failing ownership/permission boundary before changing command construction. Do not weaken ACLs or sandboxing automatically.",
-        ));
+        ), &request));
     }
 
     if request.native_process && request.exit_code.is_some_and(|code| code != 0) {
@@ -211,7 +197,18 @@ pub fn diagnose_failure(request: DiagnoseFailureRequest) -> Result<DiagnosisResu
                 detail: "A bounded stderr excerpt was supplied.".to_owned(),
             });
         }
-        return Ok(diagnosis);
+        return Ok(with_command_task_evidence(diagnosis, &request));
+    }
+
+    if command_task_outcome_disagree(&request) {
+        return Ok(result(
+            "POST_CONDITION_MISMATCH",
+            "high",
+            "command_task_outcome_disagree",
+            "Command exit status and the explicit task post-condition disagree.",
+            "trust_post_condition_separately",
+            "Preserve both facts. Do not infer task completion from exit code alone; inspect the failed or satisfied post-condition before any repair.",
+        ));
     }
 
     Ok(result(
@@ -223,6 +220,20 @@ pub fn diagnose_failure(request: DiagnoseFailureRequest) -> Result<DiagnosisResu
         "Collect only the missing shell/cwd/resolution/exit/post-condition facts tied to the failed boundary, then classify again.",
     ))
 }
+fn command_task_outcome_disagree(request: &DiagnoseFailureRequest) -> bool {
+    matches!((request.exit_code, request.post_condition), (Some(code), Some(post)) if (code == 0) != post)
+}
+
+fn with_command_task_evidence(mut diagnosis: DiagnosisResult, request: &DiagnoseFailureRequest) -> DiagnosisResult {
+    if command_task_outcome_disagree(request) {
+        diagnosis.evidence.push(DiagnosisEvidence {
+            code: "command_task_outcome_disagree".to_owned(),
+            detail: "Command exit status and the explicit task post-condition disagree.".to_owned(),
+        });
+    }
+    diagnosis
+}
+
 fn validate_request(request: &DiagnoseFailureRequest) -> Result<(), String> {
     for (name, value) in [
         ("stdout_excerpt", request.stdout_excerpt.as_deref()),
