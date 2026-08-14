@@ -1,0 +1,28 @@
+name: windows-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install Rust 1.88.0
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --no-self-update
+          rustup default 1.88.0
+      - name: Verify source tree
+        shell: pwsh
+        run: pwsh.exe -NoProfile -File ./scripts/verify-local.ps1 -SkipBaseline
