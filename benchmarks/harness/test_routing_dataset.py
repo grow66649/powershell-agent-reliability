@@ -225,6 +225,18 @@ class ExternalValidityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "post_condition_rationale"):
             routing_dataset.validate_external_validity(cases, reviews)
 
+    def test_none_category_rationale_must_match_category(self):
+        cases, reviews = _external_validity_fixture()
+        reviews[7]["post_condition_rationale"] = "some arbitrary nonempty rationale"
+        with self.assertRaisesRegex(ValueError, "post_condition_rationale"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_additional_taxonomy_shaped_marker_is_rejected(self):
+        cases, reviews = _external_validity_fixture()
+        cases[0]["files"] = {"input.txt": "COPY_OK"}
+        with self.assertRaisesRegex(ValueError, "coaching"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
     def test_selected_tool_output_marker_is_rejected(self):
         cases, reviews = _external_validity_fixture()
         cases[0]["post_condition"] = {"kind": "tool_output_marker"}

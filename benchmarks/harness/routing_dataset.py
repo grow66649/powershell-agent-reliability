@@ -46,11 +46,18 @@ COACHING_PHRASES = (
     "verify before finishing",
 )
 TAXONOMY_SHAPED_LABELS = (
-    "cwd_fail",
-    "export_missing",
-    "probe_timeout",
-    "post-condition: pass",
-    "post-condition: fail",
+    "cwd_fail", "cwd_ok",
+    "export_missing", "export_ok",
+    "copy_fail", "copy_ok",
+    "format_fail", "format_ok",
+    "helper_fail", "helper_ok",
+    "warn_fail", "warn_ok",
+    "config_fail", "config_ok",
+    "parse_fail", "parse_ok",
+    "native_fail", "native_ok",
+    "probe_timeout", "probe_ok",
+    "generic_failure",
+    "post-condition: pass", "post-condition: fail",
 )
 HARD_NEGATIVE_FAMILIES = {"pre-failure-mention", "historical-failure-context"}
 REQUIRED_TRIGGER_FAMILIES = {
@@ -130,6 +137,10 @@ def validate_external_validity(cases: list[dict], reviews: list[dict]) -> None:
             rationale = review.get("post_condition_rationale")
             if not isinstance(rationale, str) or not rationale.strip():
                 raise ValueError(f"post_condition_rationale required for case {case_id}")
+            normalized_rationale = rationale.casefold().replace("_", " ").replace("-", " ")
+            expected_meaning = category.replace("_", " ")
+            if expected_meaning not in normalized_rationale:
+                raise ValueError(f"post_condition_rationale must match {category} for case {case_id}")
         else:
             if post_kind != "workspace_state":
                 raise ValueError(f"selected case {case_id} must use workspace_state post_condition")
