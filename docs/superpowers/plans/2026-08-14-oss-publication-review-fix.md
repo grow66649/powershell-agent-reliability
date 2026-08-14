@@ -23,7 +23,7 @@
 **Files:**
 - Modify: `docs/contracts/skill-trigger-eval-contract-v0.2.md`
 
-- [ ] **Step 1: Capture the RED review condition** with `git grep -n -E 'D:\\Codex\\evidence|D:\\Runtime\\Codex\\sessions' -- docs/contracts/skill-trigger-eval-contract-v0.2.md`; expect five hits.
+- [ ] **Step 1: Capture the RED review condition** with the host-local dual-form privacy scan (rendered + source-escaped patterns supplied from private evidence); record the five contract hits without copying those host-specific prefixes into this tracked plan.
 - [ ] **Step 2: Replace the absolute examples with quoted PowerShell placeholders** defined immediately before the commands:
 
 ```powershell
@@ -32,7 +32,7 @@ $SessionsRoot = '<codex-desktop-sessions-root>'
 ```
 
 Use `Join-Path $EvidenceRoot ...` for manifest/output/report arguments. Keep the commands illustrative and state that both values are host-local operator paths, not repository paths.
-- [ ] **Step 3: Re-run the same host-local scan**; expect zero reviewer-reported absolute evidence/session-path hits in the contract.
+- [ ] **Step 3: Re-run the dual-form host-local scan** across tracked current-tree files; expect zero hits in both rendered and source-escaped representations.
 - [ ] **Step 4: Check README/AGENTS consistency**: the contract must not imply raw sessions/evidence belong in the repo.
 - [ ] **Step 5: Run** `git diff --check`; commit Task 1 as `docs: make trigger evaluation paths portable`.
 
