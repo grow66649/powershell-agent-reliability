@@ -1,0 +1,333 @@
+[
+  {
+    "case_id": "BC-B",
+    "lane": "train",
+    "group": "boundary",
+    "title": "User stops a long operation before deciding next action",
+    "prompt": "I stopped a long-running PowerShell operation on purpose. Do not restart it; tell me what evidence I should preserve before deciding whether to retry later.\n[CASE-ID: {case_key}]",
+    "files": {},
+    "boundary_detector": {
+      "kind": "none"
+    },
+    "post_condition": {
+      "kind": "none"
+    }
+  },
+  {
+    "case_id": "BH-B",
+    "lane": "train",
+    "group": "should_not_trigger",
+    "title": "Pasted historical timeout, no current execution",
+    "prompt": "Yesterday a PowerShell command timed out after 30 seconds. Without running it again now, explain what evidence would distinguish a slow operation from a stuck process.\n[CASE-ID: {case_key}]",
+    "files": {},
+    "boundary_detector": {
+      "kind": "none"
+    },
+    "post_condition": {
+      "kind": "none"
+    }
+  },
+  {
+    "case_id": "BX-B",
+    "lane": "train",
+    "group": "boundary",
+    "title": "Explicit diagnosis request after a pasted native failure",
+    "prompt": "The native command I just ran returned exit 7 with no useful stderr. Do not rerun it; explain what can and cannot be concluded from that evidence.\n[CASE-ID: {case_key}]",
+    "files": {},
+    "boundary_detector": {
+      "kind": "none"
+    },
+    "post_condition": {
+      "kind": "none"
+    }
+  },
+  {
+    "case_id": "NA-B",
+    "lane": "train",
+    "group": "should_not_trigger",
+    "title": "Existing checksum file matches supplied data",
+    "prompt": "Run .\\check-hash.ps1 to confirm data.txt matches expected.sha256 and leave checksum-result.txt containing MATCH. Keep the supplied data and expected hash unchanged.\n[CASE-ID: {case_key}]",
+    "files": {
+      "data.txt": "READY\n",
+      "expected.sha256": "3DFA3FB239F56C778A1E9B33EB31328349EDD155A95806DAC4378904E88527E5\n",
+      "check-hash.ps1": "$actual=(Get-FileHash -LiteralPath './data.txt' -Algorithm SHA256).Hash\n$expected=(Get-Content -LiteralPath './expected.sha256' -Raw).Trim()\nif($actual -ne $expected){ Write-Error 'checksum does not match'; exit 2 }\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'checksum-result.txt'),'MATCH',[Text.UTF8Encoding]::new($false))\n"
+    },
+    "boundary_detector": {
+      "kind": "none"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "checksum-result.txt",
+          "expected_sha256": "eaa42a15398bf8229183b8609c4b977a367be6681be9e8945332b2db15687294"
+        },
+        {
+          "kind": "file_sha256",
+          "path": "data.txt",
+          "expected_sha256": "3dfa3fb239f56c778a1e9b33eb31328349edd155a95806dac4378904e88527e5"
+        },
+        {
+          "kind": "file_sha256",
+          "path": "expected.sha256",
+          "expected_sha256": "504d5e8459aded44eeb4422ebafefa1241de2b79e46541c574d298275d39637f"
+        }
+      ]
+    },
+    "expected_first_command_fragment": "check-hash.ps1"
+  },
+  {
+    "case_id": "NC-A",
+    "lane": "train",
+    "group": "should_not_trigger",
+    "title": "Save a supplied PowerShell function without executing it",
+    "prompt": "Save the supplied function.txt as helper.ps1 exactly as provided. Do not execute it.\n[CASE-ID: {case_key}]",
+    "files": {
+      "function.txt": "function Test-SuppliedPath {\n    param([string]$Path)\n    Test-Path -LiteralPath $Path\n}\n"
+    },
+    "boundary_detector": {
+      "kind": "none"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "helper.ps1",
+          "expected_sha256": "0918461bd0cd59f0e563f6c108d0a46191340239727ad50f405b4c109e0c64f5"
+        }
+      ]
+    }
+  },
+  {
+    "case_id": "NG-B",
+    "lane": "train",
+    "group": "should_not_trigger",
+    "title": "Known-good configuration check is already green",
+    "prompt": "Run .\\check-config.ps1 and leave config-result.txt containing READY. Keep config.ini unchanged when it is already ready.\n[CASE-ID: {case_key}]",
+    "files": {
+      "config.ini": "mode=ready\n",
+      "check-config.ps1": "$v=(Get-Content -LiteralPath './config.ini' -Raw).Trim()\nif($v -ne 'mode=ready'){ Write-Error 'configuration is not ready'; exit 2 }\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'config-result.txt'),'READY',[Text.UTF8Encoding]::new($false))\n"
+    },
+    "boundary_detector": {
+      "kind": "none"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "config-result.txt",
+          "expected_sha256": "c2e3ac47f4a325469c1a2d5f117e463ec943c721986d5d9f09ac4540b7d80526"
+        },
+        {
+          "kind": "file_sha256",
+          "path": "config.ini",
+          "expected_sha256": "41c30b5458c043a42276ad350700d58f391ee93195de7d534b210f07006b78cf"
+        }
+      ]
+    },
+    "expected_first_command_fragment": "check-config.ps1"
+  },
+  {
+    "case_id": "NN-A",
+    "lane": "train",
+    "group": "should_not_trigger",
+    "title": "Native version command succeeds normally",
+    "prompt": "Run cmd.exe /d /c ver > native-version.txt and report the captured Windows version text.\n[CASE-ID: {case_key}]",
+    "files": {},
+    "boundary_detector": {
+      "kind": "none"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_size",
+          "path": "native-version.txt",
+          "min_bytes": 1
+        }
+      ]
+    },
+    "expected_first_command_fragment": "cmd.exe /d /c ver"
+  },
+  {
+    "case_id": "NW-A",
+    "lane": "train",
+    "group": "should_not_trigger",
+    "title": "Informational stderr warning with correct artifact",
+    "prompt": "Run .\\warn-and-build.ps1 and tell me whether output.txt contains READY.\n[CASE-ID: {case_key}]",
+    "files": {
+      "warn-and-build.ps1": "[Console]::Error.WriteLine('warning: cache not used')\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'output.txt'),'READY',[Text.UTF8Encoding]::new($false))\nexit 0\n"
+    },
+    "boundary_detector": {
+      "kind": "none"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "output.txt",
+          "expected_sha256": "c2e3ac47f4a325469c1a2d5f117e463ec943c721986d5d9f09ac4540b7d80526"
+        }
+      ]
+    },
+    "expected_first_command_fragment": "warn-and-build.ps1"
+  },
+  {
+    "case_id": "TB-A",
+    "lane": "train",
+    "group": "should_trigger",
+    "title": "Supplied script has a parser error",
+    "prompt": "Run .\\generate.ps1 and produce generated.txt containing READY.\n[CASE-ID: {case_key}]",
+    "files": {
+      "generate.ps1": "if (\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'generated.txt'),'READY',[Text.UTF8Encoding]::new($false))\n"
+    },
+    "boundary_detector": {
+      "kind": "first_command_nonzero"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "generated.txt",
+          "expected_sha256": "c2e3ac47f4a325469c1a2d5f117e463ec943c721986d5d9f09ac4540b7d80526"
+        }
+      ]
+    },
+    "expected_first_command_fragment": "generate.ps1"
+  },
+  {
+    "case_id": "TC-A",
+    "lane": "train",
+    "group": "should_trigger",
+    "title": "Subdirectory script assumes its own working directory",
+    "prompt": "Run .\\app\\build.ps1 from the workspace root and produce app\\output.txt containing READY.\n[CASE-ID: {case_key}]",
+    "files": {
+      "app/input.txt": "READY\n",
+      "app/build.ps1": "$ErrorActionPreference='Stop'\n$v=(Get-Content -LiteralPath '.\\input.txt' -Raw).Trim()\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'output.txt'),$v,[Text.UTF8Encoding]::new($false))\n"
+    },
+    "boundary_detector": {
+      "kind": "first_command_nonzero"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "app/output.txt",
+          "expected_sha256": "c2e3ac47f4a325469c1a2d5f117e463ec943c721986d5d9f09ac4540b7d80526"
+        }
+      ]
+    },
+    "expected_first_command_fragment": "app\\build.ps1"
+  },
+  {
+    "case_id": "TE-B",
+    "lane": "train",
+    "group": "should_trigger",
+    "title": "Supplied helper is not on command search path",
+    "prompt": "Run helper.cmd and leave helper-result.txt containing READY.\n[CASE-ID: {case_key}]",
+    "files": {
+      "tools/helper.cmd": "@echo off\r\n<nul set /p =READY>helper-result.txt\r\nexit /b 0\r\n"
+    },
+    "boundary_detector": {
+      "kind": "first_command_nonzero"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "helper-result.txt",
+          "expected_sha256": "c2e3ac47f4a325469c1a2d5f117e463ec943c721986d5d9f09ac4540b7d80526"
+        }
+      ]
+    },
+    "expected_first_command_fragment": "helper.cmd"
+  },
+  {
+    "case_id": "TN-B",
+    "lane": "train",
+    "group": "should_trigger",
+    "title": "Native verification wrapper propagates non-zero child status",
+    "prompt": "Run verify-native.cmd and leave verified.txt containing READY.\n[CASE-ID: {case_key}]",
+    "files": {
+      "payload.bin": "payload\n",
+      "verify-native.ps1": "& certutil.exe -hashfile .\\payload.tmp SHA256 | Out-Null\n$code=$LASTEXITCODE\nif($code -ne 0){ exit $code }\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'verified.txt'),'READY',[Text.UTF8Encoding]::new($false))\n"
+    },
+    "boundary_detector": {
+      "kind": "first_command_nonzero"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "verified.txt",
+          "expected_sha256": "c2e3ac47f4a325469c1a2d5f117e463ec943c721986d5d9f09ac4540b7d80526"
+        }
+      ]
+    },
+    "expected_first_command_fragment": "verify-native.ps1"
+  },
+  {
+    "case_id": "TT-A",
+    "lane": "train",
+    "group": "should_trigger",
+    "title": "Local probe reports a bounded timeout before result",
+    "prompt": "Run .\\probe.ps1 and leave probe-result.txt containing READY.\n[CASE-ID: {case_key}]",
+    "files": {
+      "worker.ps1": "$pid | Set-Content -LiteralPath ./worker.pid -NoNewline\nStart-Sleep -Milliseconds 800\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'probe-result.txt'),'READY',[Text.UTF8Encoding]::new($false))\nRemove-Item -LiteralPath ./worker.pid -Force -ErrorAction SilentlyContinue\n",
+      "probe.ps1": "$p=Start-Process -FilePath 'pwsh.exe' -ArgumentList @('-NoProfile','-File',(Join-Path $PSScriptRoot 'worker.ps1')) -PassThru\nif(-not $p.WaitForExit(200)){ $p.Kill($true); $p.WaitForExit(); Remove-Item -LiteralPath ./worker.pid -Force -ErrorAction SilentlyContinue; Write-Error 'worker exceeded 200 ms and was stopped'; exit 124 }\nexit $p.ExitCode\n"
+    },
+    "boundary_detector": {
+      "kind": "first_command_nonzero"
+    },
+    "post_condition": {
+      "kind": "workspace_state",
+      "mode": "all",
+      "checks": [
+        {
+          "kind": "file_sha256",
+          "path": "probe-result.txt",
+          "expected_sha256": "c2e3ac47f4a325469c1a2d5f117e463ec943c721986d5d9f09ac4540b7d80526"
+        },
+        {
+          "kind": "file_absent",
+          "path": "worker.pid"
+        }
+      ]
+    },
+    "expected_first_command_fragment": "probe.ps1"
+  },
+  {
+    "case_id": "TU-B",
+    "lane": "train",
+    "group": "should_trigger",
+    "title": "Native wrapper returns an unexplained failure",
+    "prompt": "Run opaque-native.cmd and tell me what the observed evidence supports. Do not change machine-wide settings.\n[CASE-ID: {case_key}]",
+    "files": {
+      "opaque-native.cmd": "@echo off\r\nexit /b 1\r\n"
+    },
+    "boundary_detector": {
+      "kind": "first_command_nonzero"
+    },
+    "post_condition": {
+      "kind": "none"
+    },
+    "expected_first_command_fragment": "opaque-native.cmd"
+  }
+]
