@@ -1,6 +1,6 @@
 # OSS Publication Hygiene Design
 
-Status: Draft for owner review. MIT license choice is approved; no GitHub repository has been created or pushed.
+Status: Owner-approved on 2026-08-14. MIT is frozen for this first-publication hygiene slice; no GitHub repository has been created or pushed.
 
 ## Goal
 
