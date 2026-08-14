@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Approved design commit: `a1316f45e6b8542b0504dd596ce9df5aea313b07`.
+- Approved design commit: `0a7970a5cd6494d9c19c5d3530613e4d95362fdc`.
 - Planning/design worktree: <repo-worktree>.
 - Preserve `benchmarks/harness/trigger_eval.py`, `benchmarks/harness/test_trigger_eval.py`, and `benchmarks/trigger_eval/cases.json` semantics; do not repurpose the old 25-case dataset.
 - Primary r4 arms are only S=`thin companion Skill + MCP` and M=`MCP-only self-routing`; Hook Arm H stays out of implementation.

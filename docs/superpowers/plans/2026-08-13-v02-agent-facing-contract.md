@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Exact product base: `f8d7ced0fb22575d4f5f7b095c3e23f00706baaf`.
+- Exact product base: `5cd67a80a8a7fb63f1704aa996f31ee47e7b54ed`.
 - Worktree: `<repo-worktree>`.
 - Branch: `feat/v02-contract-writer-20260813`.
 - Public tools remain exactly `inspect_environment`, `diagnose_failure`, `verify_result`.
@@ -419,8 +419,8 @@ Run:
 ```powershell
 git rev-parse HEAD
 git status --short
-git diff f8d7ced0fb22575d4f5f7b095c3e23f00706baaf..HEAD --stat
-git diff f8d7ced0fb22575d4f5f7b095c3e23f00706baaf..HEAD --check
+git diff 5cd67a80a8a7fb63f1704aa996f31ee47e7b54ed..HEAD --stat
+git diff 5cd67a80a8a7fb63f1704aa996f31ee47e7b54ed..HEAD --check
 ```
 
 Expected: status empty; diff check exit 0; no fourth tool or runner/network surface.

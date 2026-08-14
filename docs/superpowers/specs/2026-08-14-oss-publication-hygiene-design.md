@@ -6,7 +6,7 @@ Status: Owner-approved on 2026-08-14. MIT is frozen for this first-publication h
 
 Prepare the privacy-safe reviewed experimental baseline for a truthful first public GitHub push without changing product behavior, benchmark results, or development history.
 
-The source baseline is `main@2d9716655ccf8a034c307af21e499ea5a3ad9660` with public Git identity `jh06 <315192398+grow66649@users.noreply.github.com>`.
+The source baseline is `main@3ea553262d6d13462bde698a321b06d5db4d786c` with public Git identity `jh06 <315192398+grow66649@users.noreply.github.com>`.
 
 ## Publication boundary
 

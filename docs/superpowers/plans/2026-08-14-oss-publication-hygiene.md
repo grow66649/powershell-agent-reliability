@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Base/spec HEAD: `3576cc5d0e9caa78cb31d7d14052ff3f451aacc5` on `docs/oss-publication-hygiene-20260814`.
+- Base/spec HEAD: `a62284917b4f9d487c4030af3d0efd25f9365c86` on `docs/oss-publication-hygiene-20260814`.
 - License is MIT, copyright `2026 jh06`.
 - Repository status must be explicit: `Experimental / pre-release`.
 - Target is Windows Codex Desktop; Codex Desktop/app-server remains command/process/sandbox/approval owner.
@@ -394,7 +394,7 @@ Expected: PASS.
 ```powershell
 git diff --check
 git status --short
-git diff --name-only 3576cc5d0e9caa78cb31d7d14052ff3f451aacc5..HEAD
+git diff --name-only a62284917b4f9d487c4030af3d0efd25f9365c86..HEAD
 ```
 
 Expected changes only: approved hygiene spec/plan, `LICENSE`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `.github/workflows/windows-ci.yml`, three sanitized test-fixture literals in `test_trigger_eval.py`, and the two bounded planning-path edits.
