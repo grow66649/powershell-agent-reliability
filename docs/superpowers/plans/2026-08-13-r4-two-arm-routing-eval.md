@@ -11,7 +11,8 @@
 ## Global Constraints
 
 - Approved design commit: `a1316f45e6b8542b0504dd596ce9df5aea313b07`.
-- Planning/design worktree: `<repo-worktree>`.- Preserve `benchmarks/harness/trigger_eval.py`, `benchmarks/harness/test_trigger_eval.py`, and `benchmarks/trigger_eval/cases.json` semantics; do not repurpose the old 25-case dataset.
+- Planning/design worktree: <repo-worktree>.
+- Preserve `benchmarks/harness/trigger_eval.py`, `benchmarks/harness/test_trigger_eval.py`, and `benchmarks/trigger_eval/cases.json` semantics; do not repurpose the old 25-case dataset.
 - Primary r4 arms are only S=`thin companion Skill + MCP` and M=`MCP-only self-routing`; Hook Arm H stays out of implementation.
 - Do not modify Rust product code, installed Skill content, Codex runtime settings, Hook settings, release packaging, or MCP tool behavior in this plan.
 - Do not automate user-wide Skill/config switching. If M cannot be established through an explicit reversible supported setup, the campaign is blocked rather than simulated.
