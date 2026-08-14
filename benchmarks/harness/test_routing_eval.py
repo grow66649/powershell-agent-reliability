@@ -3,6 +3,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 import routing_eval
 
@@ -767,6 +768,14 @@ class RoutingEvalReviewPostConditionTests(unittest.TestCase):
         self.assertFalse(record["post_condition_passed"])
         self.assertTrue(record["valid"])
         self.assertEqual(record["post_condition_checks"][0]["error_kind"], "hash_size_limit")
+
+    def test_workspace_state_access_error_does_not_pass_file_absent(self):
+        target = pathlib.Path("inaccessible.txt")
+        with mock.patch("os.stat", side_effect=PermissionError("denied")):
+            result = routing_eval._workspace_check_evidence(0, {"kind": "file_absent", "path": "inaccessible.txt"}, target)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["status"], "access_error")
+        self.assertEqual(result["error_kind"], "PermissionError")
 
     def test_workspace_state_failure_does_not_create_boundary(self):
         with tempfile.TemporaryDirectory() as temp_dir:

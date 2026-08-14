@@ -5,6 +5,7 @@ import json
 import pathlib
 import random
 import statistics
+import stat
 from collections import defaultdict
 
 import trigger_eval
@@ -312,28 +313,33 @@ def _workspace_check_evidence(index: int, check: dict, target: pathlib.Path) -> 
     }
     try:
         kind = check["kind"]
-        exists = target.exists()
+        try:
+            metadata = target.stat()
+            exists = True
+        except FileNotFoundError:
+            metadata = None
+            exists = False
         result["observed_exists"] = exists
-        result["observed_is_directory"] = target.is_dir() if exists else False
+        result["observed_is_directory"] = stat.S_ISDIR(metadata.st_mode) if metadata is not None else False
         if kind == "file_absent":
             result["passed"] = not exists
             result["status"] = "passed" if result["passed"] else "present"
             return result
         if kind == "directory_exists":
-            result["passed"] = exists and target.is_dir()
+            result["passed"] = exists and metadata is not None and stat.S_ISDIR(metadata.st_mode)
             result["status"] = "passed" if result["passed"] else ("missing" if not exists else "wrong_type")
             return result
         if not exists:
             result["status"] = "missing"
             return result
-        if not target.is_file():
+        if metadata is None or not stat.S_ISREG(metadata.st_mode):
             result["status"] = "wrong_type"
             return result
         if kind == "file_exists":
             result["passed"] = True
             result["status"] = "passed"
             return result
-        size = target.stat().st_size
+        size = metadata.st_size
         result["observed_size_bytes"] = size
         if kind == "file_size":
             minimum = check.get("min_bytes")
