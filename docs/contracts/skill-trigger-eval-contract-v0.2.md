@@ -93,22 +93,25 @@ Explicit results must never be mixed into implicit recall or false-positive metr
 
 ## Campaign workflow
 
-Prepare one three-repeat campaign:
+Prepare one three-repeat campaign. Set both variables to host-local operator paths; they are not repository paths:
 
 ```powershell
+$EvidenceRoot = '<evidence-root>'
+$SessionsRoot = '<codex-desktop-sessions-root>'
+
 python .\benchmarks\harness\trigger_eval.py prepare `
   --cases .\benchmarks\trigger_eval\cases.json `
-  --output-root D:\Codex\evidence\powershell-agent-reliability\trigger-eval-v02-663b68e-20260813 `
+  --output-root $EvidenceRoot `
   --trials 3 --seed 20260813
 ```
 After running fresh Desktop threads from the generated prompts, collect and score:
 
 ```powershell
 python .\benchmarks\harness\trigger_eval.py collect `
-  --manifest D:\Codex\evidence\powershell-agent-reliability\trigger-eval-v02-663b68e-20260813\manifest.jsonl `
-  --sessions-root D:\Runtime\Codex\sessions `
-  --output D:\Codex\evidence\powershell-agent-reliability\trigger-eval-v02-663b68e-20260813\records.jsonl `
-  --report D:\Codex\evidence\powershell-agent-reliability\trigger-eval-v02-663b68e-20260813\report.json
+  --manifest (Join-Path $EvidenceRoot 'manifest.jsonl') `
+  --sessions-root $SessionsRoot `
+  --output (Join-Path $EvidenceRoot 'records.jsonl') `
+  --report (Join-Path $EvidenceRoot 'report.json')
 ```
 
 The collector reports the next uncollected prompt path, so the campaign can be resumed without manual bookkeeping.
