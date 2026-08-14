@@ -1,6 +1,6 @@
 # r4 Naturalistic Dataset and Desktop Campaign Design
 
-Status: Draft for owner review. The owner approved sealed validation and canary-based timeout calibration in principle; exact calibration counts/formula below remain proposed until this spec is approved.
+Status: Owner-approved on 2026-08-14. Sealed validation, 12-turn non-scored timeout calibration, and the timeout freeze formula below are frozen for this campaign revision.
 
 ## Decision question
 
@@ -23,7 +23,9 @@ Codex Desktop/app-server remains the normal command/process/sandbox owner. Raw p
 
 Use `naturalistic candidate pool -> human qualification -> provenance-cluster split -> seeded stratified freeze`.
 
-Build about 48 candidates before scored trials: approximately 20 should-trigger, 20 should-not-trigger, and 8 boundary candidates. Taxonomy is a coverage audit, not a prompt-generation recipe. Do not derive prompts from scorer branches, Skill wording, MCP tool descriptions, historical S/M outcomes, or expected activation markers.`r`n`r`n## Qualification and provenance isolation
+Build about 48 candidates before scored trials: approximately 20 should-trigger, 20 should-not-trigger, and 8 boundary candidates. Taxonomy is a coverage audit, not a prompt-generation recipe. Do not derive prompts from scorer branches, Skill wording, MCP tool descriptions, historical S/M outcomes, or expected activation markers.
+
+## Qualification and provenance isolation
 
 Each candidate is reviewed before S/M outcome visibility. Reject only predeclared quality failures: ambiguous expected routing, flaky fixture, non-deterministic validation, unsafe setup, duplicate provenance, evaluator leakage, or broken privacy/sanitization.
 
@@ -45,7 +47,9 @@ The owner may review and approve validation before sealing. A train-driven routi
 
 During train, the repository may contain train-visible artifacts only. Sealed validation content stays outside the train-visible repository surface under host-local evidence with a recorded hash. Sanitized validation/core material may be committed only after the validation evaluation is closed and publication of the cases cannot contaminate that evaluated revision.
 
-Fresh holdout content remains outside the train/validation-visible repository surface until the candidate routing revision is frozen and the holdout is ready to run.`r`n`r`n## Coverage matrix
+Fresh holdout content remains outside the train/validation-visible repository surface until the candidate routing revision is frozen and the holdout is ready to run.
+
+## Coverage matrix
 
 Trigger coverage should include quoting/expansion, CWD/path identity, shell-version mismatch, native-process outcome, timeout/cancellation, post-condition mismatch, environment staleness, safe sandbox-boundary evidence when reproducible, UNKNOWN/insufficient-evidence behavior, and one frequency/risk-driven extra case.
 
@@ -63,7 +67,9 @@ Prompts describe the user's natural goal. They do not name Reliability, the Skil
 
 Deterministic post-conditions validate observable requested world-state. They never use assistant prose or preferred repair steps as evidence. `tool_output_marker` pass/fail markers are distinct, frozen before execution, and unchanged by later model output.
 
-Human-review metadata is kept in a separate review artifact so benchmark execution fields remain minimal. Review metadata includes provenance cluster, natural-task rationale, expected routing rationale, failure-family coverage, boundary rationale, deterministic success condition, leakage checks, safety/privacy checks, and reviewer decision.`r`n`r`n## S/M setup canaries
+Human-review metadata is kept in a separate review artifact so benchmark execution fields remain minimal. Review metadata includes provenance cluster, natural-task rationale, expected routing rationale, failure-family coverage, boundary rationale, deterministic success condition, leakage checks, safety/privacy checks, and reviewer decision.
+
+## S/M setup canaries
 
 Before any calibration or scored trial:
 
@@ -79,13 +85,15 @@ Canaries are setup evidence only and never enter routing-performance denominator
 
 Do not guess the scored timeout. After setup canaries, run a non-scored calibration set distinct from train/validation/holdout.
 
-**Proposed calibration shape for owner approval:** use three representative task shapes: ordinary no-trigger, eligible failure/repair, and a deliberately slower build/test-or-verification path. Run S and M with two fresh repeats each: 3 shapes x 2 arms x 2 repeats = 12 valid completed calibration turns.
+**Frozen calibration shape:** use three representative task shapes: ordinary no-trigger, eligible failure/repair, and a deliberately slower build/test-or-verification path. Run S and M with two fresh repeats each: 3 shapes x 2 arms x 2 repeats = 12 valid completed calibration turns.
 
 Calibration uses the same Desktop build/model/effort/approval/sandbox/runtime identity planned for scored trials. A generous operational safety ceiling may stop hangs, but that ceiling is not the scored timeout and any hit blocks timeout freeze for review.
 
-**Proposed freeze rule for owner approval:** after 12 valid completed turns, freeze `T = ceil_to_30_seconds(2 * max(valid_calibration_turn_duration))`. Record all 12 durations and T before the first scored trial. The same T applies to S and M through train and validation.
+**Frozen timeout rule:** after 12 valid completed turns, freeze `T = ceil_to_30_seconds(2 * max(valid_calibration_turn_duration))`. Record all 12 durations and T before the first scored trial. The same T applies to S and M through train and validation.
 
-If train later shows T structurally censors valid tasks, stop and create a new campaign revision. Never change T mid-validation or retroactively rescore prior trials.`r`n`r`n## Scored trial interaction budget
+If train later shows T structurally censors valid tasks, stop and create a new campaign revision. Never change T mid-validation or retroactively rescore prior trials.
+
+## Scored trial interaction budget
 
 Each scored trial gets exactly one natural user prompt. No manual follow-up hint, correction, steering message, or retry prompt is allowed. Codex Desktop may continue autonomous tool calls until natural completion or T. Tool-call count is measured as cost evidence; no separate arbitrary tool-call cap is introduced in this revision.
 
@@ -107,7 +115,9 @@ Review occurs in two layers: outcome validity first, causal attribution second. 
 
 The owner reviews every core and holdout case, not just aggregate metrics. Pre-run review covers natural-task rationale, provenance cluster, expected routing, fixture, boundary detector, deterministic post-condition, leakage, safety/privacy, and reviewer decision. Post-run review presents S1/S2/S3 beside M1/M2/M3 validity, routing, task outcome, wrong repair, false completion, tokens/latency/calls, evidence pointers, anomalies, and case-level interpretation.
 
-Three repeats of one case are stability evidence, not three independent problem types.`r`n`r`n## Frozen gates and evidence boundary
+Three repeats of one case are stability evidence, not three independent problem types.
+
+## Frozen gates and evidence boundary
 
 Existing r4 gates remain unchanged: pre-failure MCP=`0`; Reliability-caused wrong repair=`0`; Reliability-caused false completion=`0`; validation+holdout eligible MCP-intervention recall `>=90%`; controlled near-miss false activation `<=5%`; production shadow false activation `<=1/100`; known-good/no-trigger median paired S idle-token delta versus M `<=+2%` with at least 90% paired token coverage.
 
