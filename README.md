@@ -1,52 +1,84 @@
 # PowerShell Agent Reliability
 
-A failure-only Windows Codex Desktop reliability companion. It adds bounded environment identity, conservative failure classification, and deterministic task-result verification without replacing Codex Desktop's command runner.
+PowerShell Agent Reliability is an experimental Windows Codex Desktop companion for diagnosing eligible PowerShell/native-command failures, exposing privacy-bounded environment identity, and checking deterministic task post-conditions. Codex Desktop/app-server remains the normal command, process, sandbox, and approval owner.
 
-## Product shape
+> **Experimental / pre-release.** The repository has accepted local harness/build evidence, but S-vs-M routing value, production shadow behavior, and harder end-to-end product value are still under evaluation. It is not a stable or production-ready release.
+
+## Architecture
 
 ```text
 Codex Desktop
-  -> thin companion Skill
-  -> local STDIO PowerShell Reliability MCP
+  -> thin failure-only companion Skill
+  -> local STDIO Reliability MCP
        -> inspect_environment
        -> diagnose_failure
        -> verify_result
 ```
 
-Codex Desktop/app-server remains the command/process/sandbox/approval owner. Plugin packaging remains a later distribution decision after repeated Desktop A/B evidence proves net value.
+The native Rust MCP exposes exactly three public tools:
 
-## Current implementation
+- `inspect_environment`: returns privacy-bounded shell, cwd, PATH, and executable identity without returning raw cwd/PATH/resolved paths.
+- `diagnose_failure`: classifies evidence against the approved failure taxonomy with an explicit `UNKNOWN` fallback and one conservative next action.
+- `verify_result`: checks explicit file/directory/hash/size post-conditions while keeping command success separate from task success.
 
-The native Rust MCP uses the official Model Context Protocol Rust SDK (`rmcp = 3.1.2`) and exposes exactly three public tools:
+The companion Skill source is `skills/powershell-reliability/`. It is intentionally failure-only: Reliability should not intervene before a first eligible failure or a false explicit post-condition.
 
-- `inspect_environment`: privacy-bounded shell/cwd/PATH/executable identity; raw cwd/PATH/resolved paths are not returned.
-- `diagnose_failure`: structured classification across the approved failure taxonomy with explicit `UNKNOWN` fallback and one conservative next action.
-- `verify_result`: explicit file/directory/hash/size post-condition checks with command success kept separate from task success.
-The companion Skill source lives at `skills/powershell-reliability/` and enforces failure-only invocation: successful first attempts with passing post-conditions receive no reliability intervention.
+## Scope and non-goals
 
-## Build and test
+This project is a bounded reliability layer, not a replacement execution stack. It does **not** provide a generic shell/terminal/process runner, replacement sandbox, universal quoting engine, automatic ACL/security weakening, PowerShell profile/global-environment mutation, or broad machine telemetry.
 
-Run the complete local gate with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-local.ps1`. The script builds/tests the Rust server, runs release lifecycle verification, scorer tests, sanitized fixture regression, Python compilation, and `git diff --check` without changing Codex configuration.
+## Prerequisites
+
+The currently verified source-build path targets Windows and uses:
+
+- Rust `1.88+`;
+- Python `3.14` for the current benchmark harness;
+- PowerShell 7 (`pwsh.exe`) for the documented verification command.
+
+From the repository root:
+
 ```powershell
-cargo test
-cargo check
 cargo build --release
-cargo test --release --test lifecycle -- --nocapture
+pwsh.exe -NoProfile -File ./scripts/verify-local.ps1 -SkipBaseline
 ```
 
-The release server is `target/release/powershell-agent-reliability.exe` on Windows. Build artifacts remain ignored and are not committed.
+The release executable is:
 
-The repository intentionally does not install or mutate Codex configuration automatically. Desktop integration is an explicit acceptance step after local build/test gates pass.
+```text
+target/release/powershell-agent-reliability.exe
+```
 
-## Benchmark harness
+## Local Codex Desktop use
 
-- `benchmarks/harness/run_baseline.py`: reproduces the sanitized synthetic failure fixtures.
-- `benchmarks/harness/measure_stdio_mcp.ps1`: measures local STDIO initialize/list readiness, idle process memory, and owned-process cleanup.
-- `benchmarks/harness/snapshot_mcp_processes.ps1`: takes a read-only exact-executable process/memory snapshot for Desktop lifecycle observation.
-- `benchmarks/harness/score_ab.py`: scores user-supplied A/B JSONL run records while preserving missing metrics as missing.
+Configure Codex Desktop through its supported MCP settings to launch the release executable as a local STDIO server. This repository does not install, rewrite, or silently mutate Codex configuration.
 
-Synthetic/local evidence proves components only. Product admission still requires repeated representative Windows Codex Desktop A/B trials under `docs/contracts/benchmark-contract.md`.
+Make `skills/powershell-reliability/` available through the supported Codex Desktop Skill workflow. Keep the intended failure-only boundary: no Reliability intervention before a first eligible failure or a false explicit task post-condition.
 
-## Non-goals
+For the bounded local acceptance procedure, see [`docs/runbooks/codex-desktop-acceptance.md`](docs/runbooks/codex-desktop-acceptance.md). Use your own local repository path rather than copying a maintainer-specific absolute path.
 
-No replacement shell/terminal/sandbox, generic process executor, automatic ACL/security weakening, profile/global-environment mutation, universal quoting engine, or broad machine telemetry.
+## Evidence and benchmark boundary
+
+Synthetic fixtures, unit tests, local STDIO lifecycle checks, and the routing harness demonstrate component and evaluator behavior only. They do not by themselves prove that Reliability improves real Codex Desktop outcomes.
+
+The project therefore separates:
+
+- harness/build correctness;
+- controlled S-vs-M routing evaluation;
+- selected-arm normal-turn shadow behavior;
+- harder repeated autonomous Desktop recovery A/B product-value evidence.
+
+Public claims should stay within the evidence actually collected for the relevant stage.
+
+## Privacy and safety boundary
+
+The MCP intentionally avoids returning full PATH/environment dumps or unrelated machine inventory. Raw Codex Desktop rollouts, exact session paths, credentials, and host-local evidence stay outside the repository unless a separately reviewed sanitized artifact is required for reproducibility.
+
+Do not weaken Windows ACLs, Codex sandboxing, approval policy, PowerShell profiles, or global environment settings merely to make a test pass.
+
+## Contributing and security
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow and [`SECURITY.md`](SECURITY.md) for conservative vulnerability-reporting guidance.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
