@@ -81,9 +81,14 @@ No release/upload/package-publish job belongs in this first workflow.
 
 ## Host-path and privacy cleanup
 
-Replace the two known public-facing `D:/Work/...` literals in historical planning documents with portable placeholders such as `<repo-worktree>` while preserving the historical technical meaning.
+Sanitize all currently known public-facing host literals: replace the two `D:/Work/...` planning-worktree values with `<repo-worktree>`, and replace the three source-escaped private Windows user-profile Skill-path fixtures in `benchmarks/harness/test_trigger_eval.py` with the neutral `C:\Users\u` form already used by `test_routing_eval.py`. Preserve test semantics and historical technical meaning.
 
-Repeat a tracked-content and reachable-history privacy scan after the hygiene changes. The scan must cover the old private email/name strings, `C:\Users\GrowU`, host-specific `D:/Work/` literals, likely credential/token patterns, and accidental raw evidence/session paths.
+Repeat tracked-current-tree and reachable-history privacy scans after the hygiene changes. Scan both rendered and source-escaped Windows user-profile forms, the old private Git identity strings from private migration evidence, host-specific `D:/Work/` literals, likely credential/token patterns, and accidental raw evidence/session paths. Never copy the old private identity into public docs merely to perform the scan.
+### Post-approval privacy finding
+
+A corrected scan found that the accepted 40-commit lineage contains three source-escaped private user-profile fixture literals in `benchmarks/harness/test_trigger_eval.py`. The earlier scan missed them because it searched the rendered path form while the Python source stores escaped backslashes. The same current tree also contains the two already-known `D:/Work/...` planning paths.
+
+Current-tree sanitation is part of this hygiene slice, but it does not erase older blob versions from Git history. Therefore first public push is additionally blocked until a separate owner-approved content-history privacy correction removes the private user-profile literal from every public-reachable historical commit and re-verifies technical equivalence, or the owner explicitly changes the privacy requirement. Under the existing full-privacy requirement, the expected path is another controlled content-history rewrite; do not silently accept the historical exposure.
 ## GitHub metadata and first-push policy
 
 Repository name remains `powershell-agent-reliability` unless the owner changes it at the later publication gate.
