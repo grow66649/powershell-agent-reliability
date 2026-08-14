@@ -41,9 +41,13 @@ The harness never infers an eligible boundary from assistant prose. Command outc
 
 ## Deterministic task post-condition
 
-A case may freeze `post_condition.kind=none` or `post_condition.kind=tool_output_marker` before execution. `tool_output_marker` requires distinct non-empty `pass_marker` and `fail_marker` values. The collector considers only matching `custom_tool_call_output` evidence and uses the latest matching deterministic output; assistant prose is never post-condition evidence.
+New core artifact tasks freeze `post_condition.kind=workspace_state`; `post_condition.kind=none` is reserved for reviewed non-artifact routing/diagnosis cases. `workspace_state` is evaluator-owned and supports `mode=all|any` over `file_exists`, `file_absent`, `directory_exists`, `file_sha256`, and `file_size` checks. All check paths are relative paths under the exact trial workspace. The harness validates containment after fixture materialization and re-resolves each target again at grading time so a later redirect cannot escape the disposable workspace.
 
-The normalized record stores `post_condition_passed` as `true`, `false`, or missing (`null`) plus the bounded evidence index/timestamp. Missing evidence remains missing. If one tool output contains both frozen pass and fail markers, the trial is invalid as ambiguous. The frozen markers are never rewritten from repair output or assistant claims.
+Workspace grading is read-only and bounded. Hashing reads at most 64 MiB per file in bounded chunks. Normal missing files, wrong types, size/hash mismatches, access failures, or hash-size-cap hits are task-level failed checks; malformed rules or path escape invalidate the post-condition evidence. Normalized evidence stores only bounded observations and a hash of the resolved path, never the raw absolute path. In normalized evidence, assistant prose is never post-condition evidence.
+
+`tool_output_marker is legacy-only`: it remains readable for historical campaigns but is not eligible to admit a new core artifact-scored case. Legacy markers still require distinct non-empty pass/fail values and only matching tool output can satisfy them.
+
+The normalized record stores `post_condition_passed`, `post_condition_evidence_source`, bounded `post_condition_checks`, and legacy evidence index/timestamp when applicable. Missing evidence remains missing. Boundary detection and final completion grading remain separate facts: final grading does not create an earlier routing boundary.
 
 ## Normalized record
 

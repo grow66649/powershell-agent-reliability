@@ -602,11 +602,17 @@ class RoutingEvalRepositoryContractTests(unittest.TestCase):
             "pair identity drift invalidates both arms",
             "post_condition_passed",
             "tool_output_marker",
+            "workspace_state",
+            "evaluator-owned",
+            "relative paths under the exact trial workspace",
+            "tool_output_marker is legacy-only",
+            "final grading does not create an earlier routing boundary",
             "assistant prose is never post-condition evidence",
             "wrong_repair review coverage",
         ]
         for phrase in required:
             self.assertIn(phrase, combined)
+        self.assertNotIn("post_condition.kind=none` or `post_condition.kind=tool_output_marker", contract)
 
 
 class RoutingEvalReviewPairConsistencyTests(unittest.TestCase):

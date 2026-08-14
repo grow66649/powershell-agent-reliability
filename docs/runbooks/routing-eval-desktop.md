@@ -48,7 +48,7 @@ python .\benchmarks\harness\routing_eval.py prepare `
   --trials 3 --seed <frozen-seed>
 ```
 
-Record the generated manifest hash before running scored turns. If a case declares a deterministic post-condition, freeze its `post_condition` rule and exact pass/fail markers before execution; do not derive or revise those criteria from later model output.
+Record the generated manifest hash before running scored turns. New core artifact cases freeze an evaluator-owned `workspace_state` rule before execution. Those rules use only the five bounded file-state checks defined by the contract and relative paths under the exact trial workspace; do not derive or revise completion criteria from later model output.
 ## 4A. Review and seal the train/validation package
 
 Before any scored execution, the owner reviews every core case row: natural-task rationale, provenance cluster, expected routing, fixture, boundary detector, deterministic post-condition, leakage checks, and safety/privacy checks. Only rows approved before S/M outcome visibility are eligible.
@@ -119,7 +119,7 @@ python .\benchmarks\harness\routing_eval.py collect `
   --report <host-local-evidence-root>\collect-report.json
 ```
 
-Review expected, collected, invalid, and remaining counts plus the next prompt/workspace pointers. Wrong workspace, duplicate identity, prompt drift, or arm-catalog mismatch is not repaired in place; preserve evidence and stop the affected batch.
+Review expected, collected, invalid, and remaining counts plus the next prompt/workspace pointers. Collection binds the rollout to its exact manifest workspace first, then reads final workspace state directly for `workspace_state` grading. It does not run a verifier command and does not ask the agent to self-report pass/fail. Wrong workspace, duplicate identity, prompt drift, or arm-catalog mismatch is not repaired in place; preserve evidence and stop the affected batch.
 ## 7. Stop on hard guardrails
 
 Stop the affected frozen revision immediately if a valid trial shows any pre-boundary Reliability MCP use, a Reliability-caused wrong repair, or a Reliability-caused false completion. Preserve the evidence; do not patch validation/holdout behavior and continue under the same identity.
@@ -153,6 +153,6 @@ Main merge, release packaging, plugin/default recommendation, and always-on reco
 
 For each matched `(case_id, trial_id)` pair, preserve the same prompt/fixture identity, model, effort, approval policy, sandbox type, Desktop/CLI runtime identity, and Desktop originator. If collection shows missing identity evidence or cross-arm drift, treat that pair as invalid evidence; do not include either arm in performance denominators.
 
-For cases with a frozen `post_condition.kind=tool_output_marker`, only the declared deterministic validator's matching tool-output marker is eligible evidence. Assistant prose or a self-reported completion claim never establishes the task post-condition. Keep the frozen pass/fail markers unchanged after the campaign starts.
+For new core artifact cases, `workspace_state` is the only admitted deterministic completion mechanism. The evaluator reads bounded final file state from the already-bound disposable workspace; assistant prose or a self-reported completion claim never establishes the task post-condition. `tool_output_marker is legacy-only` for historical campaign compatibility and is not eligible for new-core artifact admission. Final completion grading stays separate from routing evidence: final grading does not create an earlier routing boundary.
 
 When reviewing the score report, inspect ordinary `wrong_repair` and `false_completion` counts and review coverage separately from `reliability_caused_wrong_repair` and `reliability_caused_false_completion`. Causal attribution requires its own bounded human decision and evidence reference.
