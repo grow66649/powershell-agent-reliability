@@ -664,6 +664,52 @@ class RoutingEvalReviewPostConditionTests(unittest.TestCase):
             "fail_marker": "POST-CONDITION: FAIL",
         }
 
+    def _workspace_state(self):
+        return {
+            "kind": "workspace_state",
+            "mode": "all",
+            "checks": [
+                {"kind": "file_exists", "path": "result.txt"},
+                {"kind": "file_size", "path": "result.txt", "min_bytes": 1, "max_bytes": 64},
+            ],
+        }
+
+    def test_prepare_freezes_declared_workspace_state_rule(self):
+        case = _case("P00", lane="validation")
+        case["post_condition"] = self._workspace_state()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+        self.assertEqual(rows[0]["post_condition"], self._workspace_state())
+        self.assertEqual(rows[0]["post_condition"], rows[1]["post_condition"])
+
+    def test_prepare_rejects_workspace_state_parent_escape(self):
+        case = _case("P00E", lane="validation")
+        case["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "../outside.txt"}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "workspace-state"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
+    def test_prepare_rejects_workspace_state_absolute_path(self):
+        case = _case("P00A", lane="validation")
+        case["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "C:/outside.txt"}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "workspace-state"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
+    def test_prepare_rejects_workspace_state_bad_sha256(self):
+        case = _case("P00S", lane="validation")
+        case["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_sha256", "path": "result.txt", "expected_sha256": "not-a-sha"}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "sha256"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
+    def test_prepare_rejects_workspace_state_unknown_check(self):
+        case = _case("P00U", lane="validation")
+        case["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "mystery", "path": "result.txt"}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "workspace-state"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
     def test_prepare_freezes_declared_post_condition_rule(self):
         case = _case("P01", lane="validation")
         case["post_condition"] = self._post_condition()

@@ -13,7 +13,11 @@ VALID_ARMS = {"S", "M"}
 VALID_LANES = {"train", "validation", "holdout"}
 VALID_GROUPS = {"should_trigger", "should_not_trigger", "boundary"}
 BOUNDARY_KINDS = {"none", "first_command_nonzero", "tool_output_contains"}
-POST_CONDITION_KINDS = {"none", "tool_output_marker"}
+POST_CONDITION_KINDS = {"none", "tool_output_marker", "workspace_state"}
+WORKSPACE_CHECK_KINDS = {"file_exists", "file_absent", "directory_exists", "file_sha256", "file_size"}
+MAX_POST_CONDITION_CHECKS = 32
+MAX_WORKSPACE_PATH_BYTES = 32_768
+MAX_POST_CONDITION_HASH_BYTES = 64 * 1024 * 1024
 PAIR_CONSISTENCY_FIELDS = (
     "prompt_sha256", "fixture_sha256", "model", "effort",
     "approval_policy", "sandbox_type", "cli_version", "originator",
@@ -52,6 +56,37 @@ def _fixture_sha256(files: dict[str, str]) -> str:
     return digest.hexdigest().upper()
 
 
+def _workspace_relative_path(value: str) -> pathlib.PurePosixPath:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > MAX_WORKSPACE_PATH_BYTES
+        or "\0" in value
+    ):
+        raise ValueError("workspace-state path must be non-empty, bounded, and NUL-free")
+    windows = pathlib.PureWindowsPath(value)
+    path = pathlib.PurePosixPath(value.replace("\\", "/"))
+    if windows.drive or windows.is_absolute() or path.is_absolute() or ".." in path.parts:
+        raise ValueError("workspace-state path must stay relative to the trial workspace")
+    return path
+
+
+def _resolved_workspace_target(workspace: pathlib.Path, relative: str) -> pathlib.Path:
+    base = workspace.resolve()
+    target = (base / _workspace_relative_path(relative)).resolve(strict=False)
+    if target != base and base not in target.parents:
+        raise ValueError("workspace-state path escapes trial workspace")
+    return target
+
+
+def _bounded_nonnegative_int(value, field: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"workspace-state {field} must be a non-negative integer")
+    return value
+
+
 def _post_condition_rule(case: dict) -> dict:
     rule = case.get("post_condition", {"kind": "none"})
     if not isinstance(rule, dict) or rule.get("kind") not in POST_CONDITION_KINDS:
@@ -63,6 +98,26 @@ def _post_condition_rule(case: dict) -> dict:
             raise ValueError("post-condition markers must be non-empty strings")
         if pass_marker == fail_marker:
             raise ValueError("post-condition pass/fail markers must differ")
+    elif rule["kind"] == "workspace_state":
+        mode = rule.get("mode")
+        checks = rule.get("checks")
+        if mode not in {"all", "any"}:
+            raise ValueError("workspace-state mode must be all or any")
+        if not isinstance(checks, list) or not (1 <= len(checks) <= MAX_POST_CONDITION_CHECKS):
+            raise ValueError("workspace-state checks must contain 1..32 entries")
+        for check in checks:
+            if not isinstance(check, dict) or check.get("kind") not in WORKSPACE_CHECK_KINDS:
+                raise ValueError("workspace-state check kind is not supported")
+            _workspace_relative_path(check.get("path"))
+            if check["kind"] == "file_sha256":
+                expected = check.get("expected_sha256")
+                if not isinstance(expected, str) or len(expected) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in expected):
+                    raise ValueError("workspace-state expected_sha256 must be 64 hex characters")
+            if check["kind"] == "file_size":
+                minimum = _bounded_nonnegative_int(check.get("min_bytes"), "min_bytes")
+                maximum = _bounded_nonnegative_int(check.get("max_bytes"), "max_bytes")
+                if minimum is not None and maximum is not None and minimum > maximum:
+                    raise ValueError("workspace-state min_bytes must not exceed max_bytes")
     return rule
 
 
@@ -141,6 +196,10 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
             for arm in arms:
                 workspace = workspaces_dir / arm / case_key
                 _write_fixture(workspace, case.get("files") or {})
+                post_condition = _post_condition_rule(case)
+                if post_condition["kind"] == "workspace_state":
+                    for check in post_condition["checks"]:
+                        _resolved_workspace_target(workspace, check["path"])
                 manifest.append({
                     "case_key": case_key,
                     "case_id": case["case_id"],
@@ -156,7 +215,7 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
                     "fixture_sha256": fixture_hash,
                     "expected_first_command_fragment": case.get("expected_first_command_fragment"),
                     "boundary_detector": dict(case["boundary_detector"]),
-                    "post_condition": dict(_post_condition_rule(case)),
+                    "post_condition": dict(post_condition),
                 })
     for sequence, row in enumerate(manifest, 1):
         row["sequence"] = sequence
