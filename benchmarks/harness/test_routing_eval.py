@@ -855,12 +855,12 @@ class RoutingEvalReviewReportCompletenessTests(unittest.TestCase):
 
 
 class RoutingEvalReviewPostConditionEndToEndTests(unittest.TestCase):
-    def test_prepare_collect_score_carries_deterministic_post_condition(self):
+    def test_prepare_collect_score_uses_evaluator_workspace_state(self):
         case = _case("P05", lane="validation")
         case["post_condition"] = {
-            "kind": "tool_output_marker",
-            "pass_marker": "POST-CONDITION: PASS",
-            "fail_marker": "POST-CONDITION: FAIL",
+            "kind": "workspace_state",
+            "mode": "all",
+            "checks": [{"kind": "file_sha256", "path": "result.txt", "expected_sha256": hashlib.sha256(b"READY\n").hexdigest()}],
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -869,16 +869,16 @@ class RoutingEvalReviewPostConditionEndToEndTests(unittest.TestCase):
             sessions.mkdir()
             for row in manifest:
                 workspace = pathlib.Path(row["workspace"])
+                workspace.joinpath("result.txt").write_bytes(b"READY\n" if row["arm"] == "S" else b"STALE\n")
                 rows = _base_rollout(row["case_key"], workspace, skill_visible=row["arm"] == "S")
                 rows += _failed_command_rows()
                 if row["arm"] == "S":
                     rows += [_skill_row()]
-                rows += [_mcp_row()]
-                marker = "POST-CONDITION: PASS" if row["arm"] == "S" else "POST-CONDITION: FAIL"
-                rows += [_output("verify", marker, "2026-08-14T00:00:05Z")]
+                rows += [_mcp_row(), _output("verify", "POST-CONDITION: PASS", "2026-08-14T00:00:05Z")]
                 routing_eval.trigger_eval.write_jsonl(sessions / f"rollout-{row['sequence']}.jsonl", rows)
             records = routing_eval.collect_rollouts(sessions, manifest)
             report = routing_eval.score_records(records)
         self.assertEqual({row["arm"]: row["post_condition_passed"] for row in records}, {"S": True, "M": False})
+        self.assertTrue(all(row["post_condition_evidence_source"] == "evaluator_workspace" for row in records))
         self.assertEqual(report["arms"]["S"]["lanes"]["admission"]["deterministic_post_condition_completion_rate"], 1.0)
         self.assertEqual(report["arms"]["M"]["lanes"]["admission"]["deterministic_post_condition_completion_rate"], 0.0)
