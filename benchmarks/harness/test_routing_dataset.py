@@ -17,27 +17,44 @@ def _cases(lane, quotas, prefix):
                 "case_id": f"{prefix}-{counter:02d}",
                 "lane": lane,
                 "group": group,
+                "prompt": "Complete the requested disposable task and report the result.",
+                "post_condition": {"kind": "tool_output_marker"},
             })
     return rows
 
 
 def _reviews(cases):
-    return [
-        {
+    group_index = {"should_trigger": 0, "should_not_trigger": 0, "boundary": 0}
+    rows = []
+    for row in cases:
+        group = row["group"]
+        index = group_index[group]
+        group_index[group] += 1
+        family = "coverage"
+        if group == "should_trigger" and index == 0:
+            family = "command-resolution"
+        elif group == "should_not_trigger" and index == 0:
+            family = "native-semantic-nonzero"
+        elif group == "should_not_trigger" and index == 1:
+            family = "pre-failure-mention"
+        elif group == "should_not_trigger" and index == 2:
+            family = "historical-failure-context"
+        rows.append({
             "case_id": row["case_id"],
             "provenance_cluster": f"cluster-{row['case_id']}",
             "natural_task_rationale": "natural task",
-            "expected_routing_rationale": "routing rationale",
-            "failure_family": "coverage",
+            "expected_routing_rationale": group,
+            "failure_family": family,
             "boundary_rationale": "bounded",
             "deterministic_success_condition": "observable result",
+            "post_condition_rationale": "artifact task has deterministic evidence",
+            "anti_coaching_check": "passed",
             "leakage_check": "clean",
             "safety_privacy_check": "clean",
             "outcome_visible_before_review": False,
             "decision": "approved",
-        }
-        for row in cases
-    ]
+        })
+    return rows
 
 
 def _core():
@@ -101,6 +118,64 @@ class FrozenCoreTests(unittest.TestCase):
         validation_reviews[0]["provenance_cluster"] = train_reviews[0]["provenance_cluster"]
         with self.assertRaisesRegex(ValueError, "provenance cluster crosses lanes"):
             routing_dataset.validate_frozen_core(train, train_reviews, validation, validation_reviews)
+
+    def test_frozen_core_applies_external_validity_gate(self):
+        train, train_reviews, validation, validation_reviews = _core()
+        train[0]["prompt"] = "Run the task; if it fails, recover conservatively."
+        with self.assertRaisesRegex(ValueError, "workflow coaching"):
+            routing_dataset.validate_frozen_core(train, train_reviews, validation, validation_reviews)
+
+
+def _external_validity_fixture():
+    cases = [
+        {"case_id": "TR-1", "lane": "train", "group": "should_trigger", "prompt": "Run helper.cmd and create result.txt containing READY.", "post_condition": {"kind": "tool_output_marker"}},
+        {"case_id": "NT-1", "lane": "train", "group": "should_not_trigger", "prompt": "Use robocopy to copy the supplied directory and report whether the requested copy completed.", "post_condition": {"kind": "tool_output_marker"}},
+        {"case_id": "NT-2", "lane": "train", "group": "should_not_trigger", "prompt": "This script failed elsewhere. Run task.ps1 here and report the current result.", "post_condition": {"kind": "tool_output_marker"}},
+        {"case_id": "NT-3", "lane": "validation", "group": "should_not_trigger", "prompt": "Yesterday a command timed out. Without running it now, explain what evidence would distinguish slow from stuck.", "post_condition": {"kind": "none"}},
+    ]
+    reviews = [
+        {"case_id": "TR-1", "failure_family": "command-resolution", "post_condition_rationale": "artifact task has deterministic marker", "anti_coaching_check": "passed"},
+        {"case_id": "NT-1", "failure_family": "native-semantic-nonzero", "post_condition_rationale": "artifact task has deterministic marker", "anti_coaching_check": "passed"},
+        {"case_id": "NT-2", "failure_family": "pre-failure-mention", "post_condition_rationale": "artifact task has deterministic marker", "anti_coaching_check": "passed"},
+        {"case_id": "NT-3", "failure_family": "historical-failure-context", "post_condition_rationale": "explanation-only task has no world-state artifact", "anti_coaching_check": "passed"},
+    ]
+    return cases, reviews
+
+
+class ExternalValidityTests(unittest.TestCase):
+    def test_valid_external_validity_fixture_passes(self):
+        cases, reviews = _external_validity_fixture()
+        routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_workflow_coaching_phrase_is_rejected(self):
+        cases, reviews = _external_validity_fixture()
+        cases[0]["prompt"] = "Run helper.cmd; if it fails, recover conservatively and create result.txt."
+        with self.assertRaisesRegex(ValueError, "workflow coaching"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_direct_command_resolution_coverage_is_required(self):
+        cases, reviews = _external_validity_fixture()
+        reviews[0]["failure_family"] = "environment-state"
+        with self.assertRaisesRegex(ValueError, "command-resolution"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_native_semantic_nonzero_negative_is_required(self):
+        cases, reviews = _external_validity_fixture()
+        reviews[1]["failure_family"] = "known-good-native"
+        with self.assertRaisesRegex(ValueError, "native-semantic-nonzero"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_hard_negative_families_must_be_should_not_trigger(self):
+        cases, reviews = _external_validity_fixture()
+        cases[2]["group"] = "boundary"
+        with self.assertRaisesRegex(ValueError, "hard negative"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_post_condition_none_requires_review_rationale(self):
+        cases, reviews = _external_validity_fixture()
+        reviews[3]["post_condition_rationale"] = ""
+        with self.assertRaisesRegex(ValueError, "post_condition_rationale"):
+            routing_dataset.validate_external_validity(cases, reviews)
 
 
 class TimeoutTests(unittest.TestCase):

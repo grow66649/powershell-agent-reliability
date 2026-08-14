@@ -18,6 +18,8 @@ REVIEW_REQUIRED = {
     "failure_family",
     "boundary_rationale",
     "deterministic_success_condition",
+    "post_condition_rationale",
+    "anti_coaching_check",
     "leakage_check",
     "safety_privacy_check",
     "outcome_visible_before_review",
@@ -31,6 +33,54 @@ def _validate_lane(cases: list[dict], lane: str) -> None:
         raise ValueError(f"{lane} quota mismatch: {dict(counts)}")
     if any(row.get("lane") != lane for row in cases):
         raise ValueError(f"{lane} package contains another lane")
+
+
+COACHING_PHRASES = (
+    "if it fails",
+    "recover conservatively",
+    "repair only",
+    "diagnose the local cause",
+    "verify before finishing",
+)
+HARD_NEGATIVE_FAMILIES = {"pre-failure-mention", "historical-failure-context"}
+
+
+def validate_external_validity(cases: list[dict], reviews: list[dict]) -> None:
+    review_by_id = {row.get("case_id"): row for row in reviews}
+    if set(review_by_id) != {row.get("case_id") for row in cases}:
+        raise ValueError("external-validity review coverage must equal cases")
+    trigger_families = set()
+    no_trigger_families = set()
+    for case in cases:
+        case_id = case.get("case_id")
+        review = review_by_id[case_id]
+        prompt = case.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError(f"case {case_id} missing natural prompt")
+        lowered = prompt.casefold()
+        if any(phrase in lowered for phrase in COACHING_PHRASES):
+            raise ValueError(f"workflow coaching in case {case_id}")
+        if review.get("anti_coaching_check") != "passed":
+            raise ValueError(f"anti_coaching_check must pass for case {case_id}")
+        family = review.get("failure_family")
+        if family in HARD_NEGATIVE_FAMILIES and case.get("group") != "should_not_trigger":
+            raise ValueError(f"hard negative {family} must be should_not_trigger")
+        if case.get("group") == "should_trigger":
+            trigger_families.add(family)
+        elif case.get("group") == "should_not_trigger":
+            no_trigger_families.add(family)
+        post_condition = case.get("post_condition") or {"kind": "none"}
+        if post_condition.get("kind") == "none":
+            rationale = review.get("post_condition_rationale")
+            if not isinstance(rationale, str) or not rationale.strip():
+                raise ValueError(f"post_condition_rationale required for case {case_id}")
+    if "command-resolution" not in trigger_families:
+        raise ValueError("selected core requires command-resolution trigger coverage")
+    if "native-semantic-nonzero" not in no_trigger_families:
+        raise ValueError("selected core requires native-semantic-nonzero no-trigger coverage")
+    missing_hard_negatives = HARD_NEGATIVE_FAMILIES - no_trigger_families
+    if missing_hard_negatives:
+        raise ValueError(f"selected core missing hard negative coverage: {sorted(missing_hard_negatives)}")
 
 
 def validate_frozen_core(train_cases, train_reviews, validation_cases, validation_reviews) -> dict:
@@ -63,6 +113,7 @@ def validate_frozen_core(train_cases, train_reviews, validation_cases, validatio
         prior = lane_by_cluster.setdefault(cluster, case["lane"])
         if prior != case["lane"]:
             raise ValueError("provenance cluster crosses lanes")
+    validate_external_validity(cases, all_reviews)
     return {"train_count": 14, "validation_count": 10}
 
 
