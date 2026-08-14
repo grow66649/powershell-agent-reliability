@@ -109,6 +109,24 @@ Train may inform a later separately reviewed routing-description revision. Valid
 
 The future 24-case core is frozen only by the separate dataset/campaign plan. The unseen holdout stays outside the train-visible repository surface until train-driven changes are frozen.
 
+## Sealed validation and holdout visibility
+
+Validation prompts, fixtures, expected routing, post-condition specifics, provenance metadata, and review rows remain outside the train-visible repository surface until the candidate routing revision is frozen. The owner may review validation before sealing, but any session allowed to modify Skill/MCP routing after train evidence must not see validation content before that routing revision is frozen. Validation outcomes evaluate that frozen revision and cannot tune it. Any routing change after validation exposure requires a new isolated evaluation revision.
+
+Holdout material is created from a fresh unseen candidate pool only after train-driven routing changes are frozen. Holdout prompts, fixtures, and review metadata remain outside the train/validation-visible repository surface until the holdout is ready to run. Validation and holdout scheduled attempts are not discretionarily retried; missing valid evidence remains UNRESOLVED rather than being selectively resampled.
+
+## Canary and timeout calibration evidence
+
+Before scored execution, S must prove the companion Skill is visible and the intended Reliability MCP is reachable. M must prove, through a supported reversible setup, that the companion Skill is absent while the exact same Reliability MCP remains reachable. If that state cannot be established, the campaign is `BLOCKED` rather than simulated. Restore S afterward to prove reversibility.
+
+Timeout calibration uses exactly 3 representative task shapes x 2 arms x 2 repeats = 12 valid non-scored turns. Canary and calibration evidence never enters recall, false-activation, token-cost, task-completion, or routing-winner denominators.
+
+The scored wall-time budget is frozen before the first scored train turn as:
+
+`T = ceil_to_30_seconds(2 * max(valid_calibration_turn_duration))`
+
+All 12 valid durations and the resulting T are recorded before scored execution. The same T applies to S and M through train and validation. If train evidence shows T structurally censors valid tasks, stop and create a new campaign revision; never change T mid-validation or retroactively rescore earlier rows.
+
 ## Evidence hygiene
 
 Normalized records retain bounded hashes, identities, counters, and evidence pointers only. Raw prompts, transcripts, full PATH/environment, credentials, and unrelated machine inventory are not copied into the repository.
