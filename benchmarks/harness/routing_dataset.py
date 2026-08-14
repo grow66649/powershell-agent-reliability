@@ -13,6 +13,9 @@ CORE_QUOTAS = {
 REVIEW_REQUIRED = {
     "case_id",
     "provenance_cluster",
+    "provenance_basis",
+    "post_condition_category",
+    "first_failure_preview",
     "natural_task_rationale",
     "expected_routing_rationale",
     "failure_family",
@@ -42,7 +45,48 @@ COACHING_PHRASES = (
     "diagnose the local cause",
     "verify before finishing",
 )
+TAXONOMY_SHAPED_LABELS = (
+    "cwd_fail",
+    "export_missing",
+    "probe_timeout",
+    "post-condition: pass",
+    "post-condition: fail",
+)
 HARD_NEGATIVE_FAMILIES = {"pre-failure-mention", "historical-failure-context"}
+REQUIRED_TRIGGER_FAMILIES = {
+    "command-resolution",
+    "environment-staleness",
+    "native-child-status",
+    "real-timeout-cancellation",
+}
+REQUIRED_NO_TRIGGER_FAMILIES = {
+    "native-semantic-nonzero",
+    "native-success",
+    "pre-failure-mention",
+    "historical-failure-context",
+}
+POST_CONDITION_NONE_CATEGORIES = {
+    "explanation_only",
+    "diagnosis_only",
+    "intentional_cancel_no_recovery",
+    "unknown_routing_only",
+}
+POST_CONDITION_CATEGORIES = POST_CONDITION_NONE_CATEGORIES | {"mechanical_workspace_state"}
+
+
+def _visible_surface(case: dict, review: dict) -> str:
+    files = case.get("files") or {}
+    detector = case.get("boundary_detector") or {}
+    parts = [
+        case.get("prompt", ""),
+        case.get("expected_first_command_fragment", ""),
+        detector.get("marker", "") if isinstance(detector, dict) else "",
+        review.get("first_failure_preview", ""),
+    ]
+    if isinstance(files, dict):
+        for relative, content in sorted(files.items()):
+            parts.extend((relative, content))
+    return "\n".join(part for part in parts if isinstance(part, str)).casefold()
 
 
 def validate_external_validity(cases: list[dict], reviews: list[dict]) -> None:
@@ -57,11 +101,19 @@ def validate_external_validity(cases: list[dict], reviews: list[dict]) -> None:
         prompt = case.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError(f"case {case_id} missing natural prompt")
-        lowered = prompt.casefold()
-        if any(phrase in lowered for phrase in COACHING_PHRASES):
+        visible = _visible_surface(case, review)
+        if any(phrase in visible for phrase in COACHING_PHRASES) or any(
+            label in visible for label in TAXONOMY_SHAPED_LABELS
+        ):
             raise ValueError(f"workflow coaching in case {case_id}")
         if review.get("anti_coaching_check") != "passed":
             raise ValueError(f"anti_coaching_check must pass for case {case_id}")
+        cluster = review.get("provenance_cluster")
+        if not isinstance(cluster, str) or not cluster.strip():
+            raise ValueError(f"provenance_cluster required for case {case_id}")
+        basis = review.get("provenance_basis")
+        if not isinstance(basis, str) or not basis.strip():
+            raise ValueError(f"provenance_basis required for case {case_id}")
         family = review.get("failure_family")
         if family in HARD_NEGATIVE_FAMILIES and case.get("group") != "should_not_trigger":
             raise ValueError(f"hard negative {family} must be should_not_trigger")
@@ -70,18 +122,27 @@ def validate_external_validity(cases: list[dict], reviews: list[dict]) -> None:
         elif case.get("group") == "should_not_trigger":
             no_trigger_families.add(family)
         post_condition = case.get("post_condition") or {"kind": "none"}
-        if post_condition.get("kind") == "none":
+        post_kind = post_condition.get("kind")
+        category = review.get("post_condition_category")
+        if post_kind == "none":
+            if category not in POST_CONDITION_NONE_CATEGORIES:
+                raise ValueError(f"post_condition_category invalid for none case {case_id}")
             rationale = review.get("post_condition_rationale")
             if not isinstance(rationale, str) or not rationale.strip():
                 raise ValueError(f"post_condition_rationale required for case {case_id}")
-    if "command-resolution" not in trigger_families:
-        raise ValueError("selected core requires command-resolution trigger coverage")
-    if "native-semantic-nonzero" not in no_trigger_families:
-        raise ValueError("selected core requires native-semantic-nonzero no-trigger coverage")
-    missing_hard_negatives = HARD_NEGATIVE_FAMILIES - no_trigger_families
-    if missing_hard_negatives:
-        raise ValueError(f"selected core missing hard negative coverage: {sorted(missing_hard_negatives)}")
-
+        else:
+            if post_kind != "workspace_state":
+                raise ValueError(f"selected case {case_id} must use workspace_state post_condition")
+            if category != "mechanical_workspace_state":
+                raise ValueError(
+                    f"workspace_state case {case_id} requires mechanical_workspace_state category"
+                )
+    missing_trigger = REQUIRED_TRIGGER_FAMILIES - trigger_families
+    if missing_trigger:
+        raise ValueError(f"selected core missing trigger coverage: {sorted(missing_trigger)}")
+    missing_no_trigger = REQUIRED_NO_TRIGGER_FAMILIES - no_trigger_families
+    if missing_no_trigger:
+        raise ValueError(f"selected core missing no-trigger coverage: {sorted(missing_no_trigger)}")
 
 def validate_frozen_core(train_cases, train_reviews, validation_cases, validation_reviews) -> dict:
     _validate_lane(train_cases, "train")

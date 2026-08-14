@@ -7,6 +7,14 @@ import routing_dataset
 GROUPS = ("should_trigger", "should_not_trigger", "boundary")
 
 
+def _workspace_post_condition():
+    return {
+        "kind": "workspace_state",
+        "mode": "all",
+        "checks": [{"kind": "file_exists", "path": "result.txt"}],
+    }
+
+
 def _cases(lane, quotas, prefix):
     rows = []
     counter = 0
@@ -18,36 +26,47 @@ def _cases(lane, quotas, prefix):
                 "lane": lane,
                 "group": group,
                 "prompt": "Complete the requested disposable task and report the result.",
-                "post_condition": {"kind": "tool_output_marker"},
+                "post_condition": _workspace_post_condition(),
             })
     return rows
 
 
 def _reviews(cases):
     group_index = {"should_trigger": 0, "should_not_trigger": 0, "boundary": 0}
+    trigger_families = (
+        "command-resolution",
+        "environment-staleness",
+        "native-child-status",
+        "real-timeout-cancellation",
+    )
+    no_trigger_families = (
+        "native-semantic-nonzero",
+        "native-success",
+        "pre-failure-mention",
+        "historical-failure-context",
+    )
     rows = []
     for row in cases:
         group = row["group"]
         index = group_index[group]
         group_index[group] += 1
         family = "coverage"
-        if group == "should_trigger" and index == 0:
-            family = "command-resolution"
-        elif group == "should_not_trigger" and index == 0:
-            family = "native-semantic-nonzero"
-        elif group == "should_not_trigger" and index == 1:
-            family = "pre-failure-mention"
-        elif group == "should_not_trigger" and index == 2:
-            family = "historical-failure-context"
+        if group == "should_trigger" and index < len(trigger_families):
+            family = trigger_families[index]
+        elif group == "should_not_trigger" and index < len(no_trigger_families):
+            family = no_trigger_families[index]
         rows.append({
             "case_id": row["case_id"],
             "provenance_cluster": f"cluster-{row['case_id']}",
+            "provenance_basis": "sanitized unit-test provenance",
             "natural_task_rationale": "natural task",
             "expected_routing_rationale": group,
             "failure_family": family,
             "boundary_rationale": "bounded",
             "deterministic_success_condition": "observable result",
             "post_condition_rationale": "artifact task has deterministic evidence",
+            "post_condition_category": "mechanical_workspace_state",
+            "first_failure_preview": "bounded pre-outcome observation",
             "anti_coaching_check": "passed",
             "leakage_check": "clean",
             "safety_privacy_check": "clean",
@@ -125,20 +144,49 @@ class FrozenCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "workflow coaching"):
             routing_dataset.validate_frozen_core(train, train_reviews, validation, validation_reviews)
 
+    def test_v3_review_metadata_is_required(self):
+        for field in ("provenance_basis", "post_condition_category", "first_failure_preview"):
+            with self.subTest(field=field):
+                train, train_reviews, validation, validation_reviews = _core()
+                del train_reviews[0][field]
+                with self.assertRaisesRegex(ValueError, "review coverage"):
+                    routing_dataset.validate_frozen_core(train, train_reviews, validation, validation_reviews)
+
 
 def _external_validity_fixture():
     cases = [
-        {"case_id": "TR-1", "lane": "train", "group": "should_trigger", "prompt": "Run helper.cmd and create result.txt containing READY.", "post_condition": {"kind": "tool_output_marker"}},
-        {"case_id": "NT-1", "lane": "train", "group": "should_not_trigger", "prompt": "Use robocopy to copy the supplied directory and report whether the requested copy completed.", "post_condition": {"kind": "tool_output_marker"}},
-        {"case_id": "NT-2", "lane": "train", "group": "should_not_trigger", "prompt": "This script failed elsewhere. Run task.ps1 here and report the current result.", "post_condition": {"kind": "tool_output_marker"}},
-        {"case_id": "NT-3", "lane": "validation", "group": "should_not_trigger", "prompt": "Yesterday a command timed out. Without running it now, explain what evidence would distinguish slow from stuck.", "post_condition": {"kind": "none"}},
+        {"case_id": "TR-1", "lane": "train", "group": "should_trigger", "prompt": "Run helper.cmd and create result.txt containing READY.", "post_condition": _workspace_post_condition()},
+        {"case_id": "TR-2", "lane": "train", "group": "should_trigger", "prompt": "Run resolve.ps1 and create the requested result artifact.", "post_condition": _workspace_post_condition()},
+        {"case_id": "TR-3", "lane": "train", "group": "should_trigger", "prompt": "Run child-wrapper.cmd and record the requested artifact.", "post_condition": _workspace_post_condition()},
+        {"case_id": "TR-4", "lane": "validation", "group": "should_trigger", "prompt": "Run sleeper.ps1 and report the requested artifact.", "post_condition": _workspace_post_condition()},
+        {"case_id": "NT-1", "lane": "train", "group": "should_not_trigger", "prompt": "Run native-check.exe and report the current result.", "post_condition": _workspace_post_condition()},
+        {"case_id": "NT-2", "lane": "train", "group": "should_not_trigger", "prompt": "Run native-success.exe and save the requested result.", "post_condition": _workspace_post_condition()},
+        {"case_id": "NT-3", "lane": "train", "group": "should_not_trigger", "prompt": "The helper is mentioned in the task notes. Run task.ps1 here and report the current result.", "post_condition": _workspace_post_condition()},
+        {"case_id": "NT-4", "lane": "validation", "group": "should_not_trigger", "prompt": "Yesterday a command behaved differently. Without running it now, explain which observations would distinguish slow from stuck.", "post_condition": {"kind": "none"}},
     ]
-    reviews = [
-        {"case_id": "TR-1", "failure_family": "command-resolution", "post_condition_rationale": "artifact task has deterministic marker", "anti_coaching_check": "passed"},
-        {"case_id": "NT-1", "failure_family": "native-semantic-nonzero", "post_condition_rationale": "artifact task has deterministic marker", "anti_coaching_check": "passed"},
-        {"case_id": "NT-2", "failure_family": "pre-failure-mention", "post_condition_rationale": "artifact task has deterministic marker", "anti_coaching_check": "passed"},
-        {"case_id": "NT-3", "failure_family": "historical-failure-context", "post_condition_rationale": "explanation-only task has no world-state artifact", "anti_coaching_check": "passed"},
-    ]
+    families = (
+        "command-resolution",
+        "environment-staleness",
+        "native-child-status",
+        "real-timeout-cancellation",
+        "native-semantic-nonzero",
+        "native-success",
+        "pre-failure-mention",
+        "historical-failure-context",
+    )
+    reviews = []
+    for case, family in zip(cases, families):
+        is_none = case["post_condition"]["kind"] == "none"
+        reviews.append({
+            "case_id": case["case_id"],
+            "provenance_cluster": f"cluster-{case['case_id']}",
+            "provenance_basis": "sanitized unit-test provenance",
+            "failure_family": family,
+            "post_condition_rationale": "explanation-only task" if is_none else "mechanically scored workspace state",
+            "post_condition_category": "explanation_only" if is_none else "mechanical_workspace_state",
+            "first_failure_preview": "bounded pre-outcome observation",
+            "anti_coaching_check": "passed",
+        })
     return cases, reviews
 
 
@@ -155,27 +203,87 @@ class ExternalValidityTests(unittest.TestCase):
 
     def test_direct_command_resolution_coverage_is_required(self):
         cases, reviews = _external_validity_fixture()
-        reviews[0]["failure_family"] = "environment-state"
+        reviews[0]["failure_family"] = "other-trigger"
         with self.assertRaisesRegex(ValueError, "command-resolution"):
             routing_dataset.validate_external_validity(cases, reviews)
 
     def test_native_semantic_nonzero_negative_is_required(self):
         cases, reviews = _external_validity_fixture()
-        reviews[1]["failure_family"] = "known-good-native"
+        reviews[4]["failure_family"] = "other-negative"
         with self.assertRaisesRegex(ValueError, "native-semantic-nonzero"):
             routing_dataset.validate_external_validity(cases, reviews)
 
     def test_hard_negative_families_must_be_should_not_trigger(self):
         cases, reviews = _external_validity_fixture()
-        cases[2]["group"] = "boundary"
+        cases[6]["group"] = "boundary"
         with self.assertRaisesRegex(ValueError, "hard negative"):
             routing_dataset.validate_external_validity(cases, reviews)
 
     def test_post_condition_none_requires_review_rationale(self):
         cases, reviews = _external_validity_fixture()
-        reviews[3]["post_condition_rationale"] = ""
+        reviews[7]["post_condition_rationale"] = ""
         with self.assertRaisesRegex(ValueError, "post_condition_rationale"):
             routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_selected_tool_output_marker_is_rejected(self):
+        cases, reviews = _external_validity_fixture()
+        cases[0]["post_condition"] = {"kind": "tool_output_marker"}
+        with self.assertRaisesRegex(ValueError, "workspace_state"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_workspace_state_requires_mechanical_category(self):
+        cases, reviews = _external_validity_fixture()
+        reviews[0]["post_condition_category"] = "diagnosis_only"
+        with self.assertRaisesRegex(ValueError, "mechanical_workspace_state"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_none_category_must_be_explicitly_approved(self):
+        cases, reviews = _external_validity_fixture()
+        reviews[7]["post_condition_category"] = "freeform_none"
+        with self.assertRaisesRegex(ValueError, "post_condition_category"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_provenance_basis_is_required(self):
+        cases, reviews = _external_validity_fixture()
+        reviews[0]["provenance_basis"] = ""
+        with self.assertRaisesRegex(ValueError, "provenance_basis"):
+            routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_new_required_family_coverage_is_enforced(self):
+        required = {
+            "environment-staleness": 1,
+            "native-child-status": 2,
+            "real-timeout-cancellation": 3,
+            "native-success": 5,
+        }
+        for family, index in required.items():
+            with self.subTest(family=family):
+                cases, reviews = _external_validity_fixture()
+                reviews[index]["failure_family"] = "other-family"
+                with self.assertRaisesRegex(ValueError, family):
+                    routing_dataset.validate_external_validity(cases, reviews)
+
+    def test_taxonomy_shaped_labels_are_rejected_on_every_visible_surface(self):
+        surfaces = ("prompt", "filename", "fixture", "first_command", "boundary_marker", "first_failure")
+        for surface in surfaces:
+            with self.subTest(surface=surface):
+                cases, reviews = _external_validity_fixture()
+                case = cases[0]
+                review = reviews[0]
+                if surface == "prompt":
+                    case["prompt"] = "Run helper.cmd CWD_FAIL"
+                elif surface == "filename":
+                    case["files"] = {"CWD_FAIL.txt": "safe fixture text"}
+                elif surface == "fixture":
+                    case["files"] = {"input.txt": "CWD_FAIL"}
+                elif surface == "first_command":
+                    case["expected_first_command_fragment"] = "helper.cmd CWD_FAIL"
+                elif surface == "boundary_marker":
+                    case["boundary_detector"] = {"marker": "CWD_FAIL"}
+                else:
+                    review["first_failure_preview"] = "CWD_FAIL"
+                with self.assertRaisesRegex(ValueError, "coaching"):
+                    routing_dataset.validate_external_validity(cases, reviews)
 
 
 class TimeoutTests(unittest.TestCase):
