@@ -264,7 +264,7 @@ def _scan_tool_events(rows: list[dict]) -> tuple[list[dict], dict[str, dict]]:
 
 def _first_command(calls: list[dict], outputs: dict[str, dict]) -> dict | None:
     for call in calls:
-        if trigger_eval.SHELL_CALL not in call["input"]:
+        if not trigger_eval._is_shell_call(call["input"]):
             continue
         result = dict(call)
         output = outputs.get(call.get("call_id"))
@@ -422,7 +422,7 @@ def evaluate_post_condition(rows: list[dict], manifest_row: dict) -> dict:
 
 
 def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: dict) -> dict:
-    base = trigger_eval.extract_rollout(rows, rollout_path)
+    base = trigger_eval.extract_rollout(rows, rollout_path, expected_case_key=manifest_row.get("case_key"))
     if base is None:
         raise ValueError("rollout contains no routing case marker")
     calls, outputs = _scan_tool_events(rows)
@@ -523,28 +523,22 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
 
 def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[dict]:
     manifest_index = {}
-    known_case_keys = set()
     for row in manifest:
-        key = (row["case_key"], row["workspace_sha256"])
+        key = row["workspace_sha256"]
         if key in manifest_index:
-            raise ValueError(f"duplicate manifest binding {key}")
+            raise ValueError(f"duplicate manifest workspace binding {key}")
         manifest_index[key] = row
-        known_case_keys.add(row["case_key"])
     records = []
     seen = set()
     for path in sorted(sessions_root.rglob("rollout-*.jsonl")):
-        raw_text = path.read_text(encoding="utf-8-sig", errors="replace")
-        markers = {match.upper() for match in trigger_eval.CASE_RE.findall(raw_text)}
-        if not (markers & known_case_keys):
-            continue
-        rows = trigger_eval.load_jsonl(path)
-        case_key, _ = trigger_eval._case_user_message(rows)
-        if case_key not in known_case_keys:
+        try:
+            rows = trigger_eval.load_jsonl(path)
+        except ValueError:
             continue
         cwd = _turn_cwd(rows)
         if cwd is None:
             continue
-        manifest_row = manifest_index.get((case_key, workspace_identity(cwd)))
+        manifest_row = manifest_index.get(workspace_identity(cwd))
         if manifest_row is None:
             continue
         identity = (manifest_row["case_id"], manifest_row["trial_id"], manifest_row["arm"])

@@ -149,6 +149,22 @@ def _mcp_row(timestamp="2026-08-14T00:00:04Z"):
 
 
 class RoutingEvalTemporalTests(unittest.TestCase):
+    def test_current_desktop_exec_command_counts_as_first_command(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("R00-T01", "M", workspace)
+            rows = _base_rollout("R00-T01", workspace, skill_visible=False) + [
+                _tool(
+                    "cmd1",
+                    "const r = await tools.exec_command({cmd:'pwsh.exe -NoProfile -File .\\\\task.ps1'}); text(r.output);",
+                    "2026-08-14T00:00:01Z",
+                ),
+                _output("cmd1", "CONFIG_MISSING", "2026-08-14T00:00:02Z"),
+            ]
+            record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
+        self.assertIsNotNone(record["first_attempt_start_index"])
+        self.assertNotIn("first_command_mismatch", record["invalid_reasons"])
+
     def test_s_failure_skill_then_mcp_is_valid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = pathlib.Path(temp_dir)
@@ -289,6 +305,41 @@ class RoutingEvalCollectionTests(unittest.TestCase):
             routing_eval.trigger_eval.write_jsonl(root / "rollout-b.jsonl", rows)
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 routing_eval.collect_rollouts(root, manifest)
+
+    def test_collect_binds_markerless_calibration_prompt_by_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            workspace = root / "calibration" / "M" / "cal-read-existing-state-T01"
+            workspace.mkdir(parents=True)
+            manifest = [_manifest_row("R04-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})]
+            manifest[0]["case_key"] = "cal-read-existing-state-T01"
+            manifest[0]["case_id"] = "cal-read-existing-state"
+            manifest[0]["prompt_sha256"] = routing_eval.trigger_eval._sha256_text("Check config-status.txt")
+            rows = _base_rollout("R04-T01", workspace, skill_visible=False)
+            rows[3]["payload"]["message"] = "Check config-status.txt\n"
+            routing_eval.trigger_eval.write_jsonl(root / "rollout-calibration.jsonl", rows)
+            records = routing_eval.collect_rollouts(root, manifest)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["case_key"], "cal-read-existing-state-T01")
+        self.assertTrue(records[0]["valid"])
+        self.assertEqual(records[0]["prompt_sha256"], manifest[0]["prompt_sha256"])
+
+    def test_collect_preserves_non_newline_prompt_whitespace_drift(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            workspace = root / "calibration" / "M" / "cal-slower-verification-T01"
+            workspace.mkdir(parents=True)
+            manifest = [_manifest_row("R05-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})]
+            manifest[0]["case_key"] = "cal-slower-verification-T01"
+            manifest[0]["case_id"] = "cal-slower-verification"
+            manifest[0]["prompt_sha256"] = routing_eval.trigger_eval._sha256_text("Run verify-package.ps1")
+            rows = _base_rollout("R05-T01", workspace, skill_visible=False)
+            rows[3]["payload"]["message"] = "Run verify-package.ps1 \n"
+            routing_eval.trigger_eval.write_jsonl(root / "rollout-drift.jsonl", rows)
+            records = routing_eval.collect_rollouts(root, manifest)
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["valid"])
+        self.assertIn("prompt_hash_mismatch", records[0]["invalid_reasons"])
 
 
 def _token_row(total, timestamp="2026-08-14T00:00:00Z", **overrides):
