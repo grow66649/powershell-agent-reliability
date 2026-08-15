@@ -5,6 +5,7 @@ import json
 import pathlib
 import random
 import statistics
+import stat
 from collections import defaultdict
 
 import trigger_eval
@@ -13,7 +14,11 @@ VALID_ARMS = {"S", "M"}
 VALID_LANES = {"train", "validation", "holdout"}
 VALID_GROUPS = {"should_trigger", "should_not_trigger", "boundary"}
 BOUNDARY_KINDS = {"none", "first_command_nonzero", "tool_output_contains"}
-POST_CONDITION_KINDS = {"none", "tool_output_marker"}
+POST_CONDITION_KINDS = {"none", "tool_output_marker", "workspace_state"}
+WORKSPACE_CHECK_KINDS = {"file_exists", "file_absent", "directory_exists", "file_sha256", "file_size"}
+MAX_POST_CONDITION_CHECKS = 32
+MAX_WORKSPACE_PATH_BYTES = 32_768
+MAX_POST_CONDITION_HASH_BYTES = 64 * 1024 * 1024
 PAIR_CONSISTENCY_FIELDS = (
     "prompt_sha256", "fixture_sha256", "model", "effort",
     "approval_policy", "sandbox_type", "cli_version", "originator",
@@ -52,6 +57,37 @@ def _fixture_sha256(files: dict[str, str]) -> str:
     return digest.hexdigest().upper()
 
 
+def _workspace_relative_path(value: str) -> pathlib.PurePosixPath:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > MAX_WORKSPACE_PATH_BYTES
+        or "\0" in value
+    ):
+        raise ValueError("workspace-state path must be non-empty, bounded, and NUL-free")
+    windows = pathlib.PureWindowsPath(value)
+    path = pathlib.PurePosixPath(value.replace("\\", "/"))
+    if windows.drive or windows.is_absolute() or path.is_absolute() or ".." in path.parts:
+        raise ValueError("workspace-state path must stay relative to the trial workspace")
+    return path
+
+
+def _resolved_workspace_target(workspace: pathlib.Path, relative: str) -> pathlib.Path:
+    base = workspace.resolve()
+    target = (base / _workspace_relative_path(relative)).resolve(strict=False)
+    if target != base and base not in target.parents:
+        raise ValueError("workspace-state path escapes trial workspace")
+    return target
+
+
+def _bounded_nonnegative_int(value, field: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"workspace-state {field} must be a non-negative integer")
+    return value
+
+
 def _post_condition_rule(case: dict) -> dict:
     rule = case.get("post_condition", {"kind": "none"})
     if not isinstance(rule, dict) or rule.get("kind") not in POST_CONDITION_KINDS:
@@ -63,6 +99,26 @@ def _post_condition_rule(case: dict) -> dict:
             raise ValueError("post-condition markers must be non-empty strings")
         if pass_marker == fail_marker:
             raise ValueError("post-condition pass/fail markers must differ")
+    elif rule["kind"] == "workspace_state":
+        mode = rule.get("mode")
+        checks = rule.get("checks")
+        if mode not in {"all", "any"}:
+            raise ValueError("workspace-state mode must be all or any")
+        if not isinstance(checks, list) or not (1 <= len(checks) <= MAX_POST_CONDITION_CHECKS):
+            raise ValueError("workspace-state checks must contain 1..32 entries")
+        for check in checks:
+            if not isinstance(check, dict) or check.get("kind") not in WORKSPACE_CHECK_KINDS:
+                raise ValueError("workspace-state check kind is not supported")
+            _workspace_relative_path(check.get("path"))
+            if check["kind"] == "file_sha256":
+                expected = check.get("expected_sha256")
+                if not isinstance(expected, str) or len(expected) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in expected):
+                    raise ValueError("workspace-state expected_sha256 must be 64 hex characters")
+            if check["kind"] == "file_size":
+                minimum = _bounded_nonnegative_int(check.get("min_bytes"), "min_bytes")
+                maximum = _bounded_nonnegative_int(check.get("max_bytes"), "max_bytes")
+                if minimum is not None and maximum is not None and minimum > maximum:
+                    raise ValueError("workspace-state min_bytes must not exceed max_bytes")
     return rule
 
 
@@ -141,6 +197,10 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
             for arm in arms:
                 workspace = workspaces_dir / arm / case_key
                 _write_fixture(workspace, case.get("files") or {})
+                post_condition = _post_condition_rule(case)
+                if post_condition["kind"] == "workspace_state":
+                    for check in post_condition["checks"]:
+                        _resolved_workspace_target(workspace, check["path"])
                 manifest.append({
                     "case_key": case_key,
                     "case_id": case["case_id"],
@@ -156,7 +216,7 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
                     "fixture_sha256": fixture_hash,
                     "expected_first_command_fragment": case.get("expected_first_command_fragment"),
                     "boundary_detector": dict(case["boundary_detector"]),
-                    "post_condition": dict(_post_condition_rule(case)),
+                    "post_condition": dict(post_condition),
                 })
     for sequence, row in enumerate(manifest, 1):
         row["sequence"] = sequence
@@ -204,7 +264,7 @@ def _scan_tool_events(rows: list[dict]) -> tuple[list[dict], dict[str, dict]]:
 
 def _first_command(calls: list[dict], outputs: dict[str, dict]) -> dict | None:
     for call in calls:
-        if trigger_eval.SHELL_CALL not in call["input"]:
+        if not trigger_eval._is_shell_call(call["input"]):
             continue
         result = dict(call)
         output = outputs.get(call.get("call_id"))
@@ -238,13 +298,108 @@ def find_eligible_boundary(rows: list[dict], manifest_row: dict, first_command: 
     raise ValueError(f"unsupported boundary detector {kind!r}")
 
 
+def _workspace_path_sha256(path: pathlib.Path) -> str:
+    normalized = str(path).replace("\\", "/").casefold()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest().upper()
+
+
+def _workspace_check_evidence(index: int, check: dict, target: pathlib.Path) -> dict:
+    result = {
+        "index": index,
+        "kind": check["kind"],
+        "passed": False,
+        "status": "failed",
+        "path_sha256": _workspace_path_sha256(target),
+    }
+    try:
+        kind = check["kind"]
+        try:
+            metadata = target.stat()
+            exists = True
+        except FileNotFoundError:
+            metadata = None
+            exists = False
+        result["observed_exists"] = exists
+        result["observed_is_directory"] = stat.S_ISDIR(metadata.st_mode) if metadata is not None else False
+        if kind == "file_absent":
+            result["passed"] = not exists
+            result["status"] = "passed" if result["passed"] else "present"
+            return result
+        if kind == "directory_exists":
+            result["passed"] = exists and metadata is not None and stat.S_ISDIR(metadata.st_mode)
+            result["status"] = "passed" if result["passed"] else ("missing" if not exists else "wrong_type")
+            return result
+        if not exists:
+            result["status"] = "missing"
+            return result
+        if metadata is None or not stat.S_ISREG(metadata.st_mode):
+            result["status"] = "wrong_type"
+            return result
+        if kind == "file_exists":
+            result["passed"] = True
+            result["status"] = "passed"
+            return result
+        size = metadata.st_size
+        result["observed_size_bytes"] = size
+        if kind == "file_size":
+            minimum = check.get("min_bytes")
+            maximum = check.get("max_bytes")
+            result["passed"] = (minimum is None or size >= minimum) and (maximum is None or size <= maximum)
+            result["status"] = "passed" if result["passed"] else "size_mismatch"
+            return result
+        if kind == "file_sha256":
+            if size > MAX_POST_CONDITION_HASH_BYTES:
+                result["status"] = "hash_not_read"
+                result["error_kind"] = "hash_size_limit"
+                return result
+            digest = hashlib.sha256()
+            with target.open("rb") as handle:
+                while True:
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+            observed = digest.hexdigest().upper()
+            result["observed_sha256"] = observed
+            result["passed"] = observed == check["expected_sha256"].upper()
+            result["status"] = "passed" if result["passed"] else "hash_mismatch"
+            return result
+        result["status"] = "unsupported"
+        result["error_kind"] = "unsupported_check"
+        return result
+    except OSError as exc:
+        result["status"] = "access_error"
+        result["error_kind"] = exc.__class__.__name__
+        return result
+
+
+def evaluate_workspace_state(manifest_row: dict) -> dict:
+    rule = manifest_row.get("post_condition")
+    try:
+        _post_condition_rule({"case_id": manifest_row.get("case_id"), "post_condition": rule})
+        if not isinstance(rule, dict) or rule.get("kind") != "workspace_state":
+            raise ValueError("workspace-state rule required")
+        workspace = pathlib.Path(manifest_row["workspace"])
+        check_results = []
+        for index, check in enumerate(rule["checks"]):
+            target = _resolved_workspace_target(workspace, check["path"])
+            check_results.append(_workspace_check_evidence(index, check, target))
+    except (KeyError, TypeError, ValueError):
+        return {"passed": None, "index": None, "timestamp": None, "invalid_reason": "post_condition_invalid", "source": "evaluator_workspace", "checks": []}
+    passed_values = [item["passed"] for item in check_results]
+    passed = all(passed_values) if rule["mode"] == "all" else any(passed_values)
+    return {"passed": passed, "index": None, "timestamp": None, "invalid_reason": None, "source": "evaluator_workspace", "checks": check_results}
+
+
 def evaluate_post_condition(rows: list[dict], manifest_row: dict) -> dict:
     rule = manifest_row.get("post_condition", {"kind": "none"})
     kind = rule.get("kind") if isinstance(rule, dict) else None
     if kind == "none":
-        return {"passed": None, "index": None, "timestamp": None, "invalid_reason": None}
+        return {"passed": None, "index": None, "timestamp": None, "invalid_reason": None, "source": None, "checks": []}
+    if kind == "workspace_state":
+        return evaluate_workspace_state(manifest_row)
     if kind != "tool_output_marker":
-        raise ValueError(f"unsupported post-condition rule {kind!r}")
+        return {"passed": None, "index": None, "timestamp": None, "invalid_reason": "post_condition_invalid", "source": None, "checks": []}
     pass_marker = rule["pass_marker"]
     fail_marker = rule["fail_marker"]
     latest = None
@@ -260,14 +415,14 @@ def evaluate_post_condition(rows: list[dict], manifest_row: dict) -> dict:
         if not has_pass and not has_fail:
             continue
         if has_pass and has_fail:
-            latest = {"passed": None, "index": index, "timestamp": row.get("timestamp"), "invalid_reason": "post_condition_ambiguous"}
+            latest = {"passed": None, "index": index, "timestamp": row.get("timestamp"), "invalid_reason": "post_condition_ambiguous", "source": "tool_output_legacy", "checks": []}
         else:
-            latest = {"passed": has_pass, "index": index, "timestamp": row.get("timestamp"), "invalid_reason": None}
-    return latest or {"passed": None, "index": None, "timestamp": None, "invalid_reason": None}
+            latest = {"passed": has_pass, "index": index, "timestamp": row.get("timestamp"), "invalid_reason": None, "source": "tool_output_legacy", "checks": []}
+    return latest or {"passed": None, "index": None, "timestamp": None, "invalid_reason": None, "source": "tool_output_legacy", "checks": []}
 
 
 def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: dict) -> dict:
-    base = trigger_eval.extract_rollout(rows, rollout_path)
+    base = trigger_eval.extract_rollout(rows, rollout_path, expected_case_key=manifest_row.get("case_key"))
     if base is None:
         raise ValueError("rollout contains no routing case marker")
     calls, outputs = _scan_tool_events(rows)
@@ -357,6 +512,8 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
         "post_condition_passed": post_condition["passed"],
         "post_condition_evidence_index": post_condition["index"],
         "post_condition_evidence_timestamp": post_condition["timestamp"],
+        "post_condition_evidence_source": post_condition.get("source"),
+        "post_condition_checks": post_condition.get("checks") or [],
         "valid": not invalid_reasons,
         "invalid_reasons": invalid_reasons,
     }
@@ -364,30 +521,41 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
     return record
 
 
+def _malformed_rollout_cwd(path: pathlib.Path) -> str | None:
+    rows = []
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(value, dict):
+            break
+        rows.append(value)
+    return _turn_cwd(rows)
+
 def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[dict]:
     manifest_index = {}
-    known_case_keys = set()
     for row in manifest:
-        key = (row["case_key"], row["workspace_sha256"])
+        key = row["workspace_sha256"]
         if key in manifest_index:
-            raise ValueError(f"duplicate manifest binding {key}")
+            raise ValueError(f"duplicate manifest workspace binding {key}")
         manifest_index[key] = row
-        known_case_keys.add(row["case_key"])
     records = []
     seen = set()
     for path in sorted(sessions_root.rglob("rollout-*.jsonl")):
-        raw_text = path.read_text(encoding="utf-8-sig", errors="replace")
-        markers = {match.upper() for match in trigger_eval.CASE_RE.findall(raw_text)}
-        if not (markers & known_case_keys):
-            continue
-        rows = trigger_eval.load_jsonl(path)
-        case_key, _ = trigger_eval._case_user_message(rows)
-        if case_key not in known_case_keys:
+        try:
+            rows = trigger_eval.load_jsonl(path)
+        except ValueError as exc:
+            malformed_cwd = _malformed_rollout_cwd(path)
+            if malformed_cwd is not None and workspace_identity(malformed_cwd) in manifest_index:
+                raise ValueError(f"malformed rollout for manifest workspace {malformed_cwd}") from exc
             continue
         cwd = _turn_cwd(rows)
         if cwd is None:
             continue
-        manifest_row = manifest_index.get((case_key, workspace_identity(cwd)))
+        manifest_row = manifest_index.get(workspace_identity(cwd))
         if manifest_row is None:
             continue
         identity = (manifest_row["case_id"], manifest_row["trial_id"], manifest_row["arm"])

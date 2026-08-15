@@ -1,0 +1,53 @@
+[
+  {
+    "case_id": "cal-read-existing-state",
+    "title": "Read an existing configuration state",
+    "lane": "train",
+    "group": "should_not_trigger",
+    "prompt": "Check config-status.txt and confirm whether the workspace is already marked ready. Do not change the file.",
+    "files": {
+      "config-status.txt": "CAL_READY\n"
+    },
+    "boundary_detector": {"kind": "none"},
+    "post_condition": {
+      "kind": "tool_output_marker",
+      "pass_marker": "CAL_READY",
+      "fail_marker": "CAL_NOT_READY"
+    }
+  },
+  {
+    "case_id": "cal-repair-missing-config",
+    "title": "Repair a missing local configuration file",
+    "lane": "train",
+    "group": "should_trigger",
+    "prompt": "Run repair-check.ps1. If the local configuration is incomplete, repair the workspace so the check succeeds, then verify the check again.",
+    "files": {
+      "repair-check.ps1": "$expected = 'enabled=true'\nif (-not (Test-Path -LiteralPath './config.txt')) { Write-Output 'CONFIG_MISSING'; exit 9 }\n$value = (Get-Content -LiteralPath './config.txt' -Raw).Trim()\nif ($value -ne $expected) { Write-Output 'CAL_REPAIR_FAIL'; exit 7 }\nWrite-Output 'CAL_REPAIR_OK'\nexit 0\n"
+    },
+    "expected_first_command_fragment": "repair-check.ps1",
+    "boundary_detector": {"kind": "first_command_nonzero"},
+    "post_condition": {
+      "kind": "tool_output_marker",
+      "pass_marker": "CAL_REPAIR_OK",
+      "fail_marker": "CAL_REPAIR_FAIL"
+    }
+  },
+  {
+    "case_id": "cal-slower-verification",
+    "title": "Run a slower deterministic verification",
+    "lane": "train",
+    "group": "should_not_trigger",
+    "prompt": "Run verify-package.ps1 and report whether the supplied package data passes its verification. Do not edit the package data.",
+    "files": {
+      "package-data.txt": "alpha\nbeta\ngamma\n",
+      "verify-package.ps1": "$expected = '4FDBC441EA7B546100E086AC1E4FC5AE6749B7314311C99DB05BE450ECA12996'\nStart-Sleep -Seconds 3\n$actual = (Get-FileHash -Algorithm SHA256 -LiteralPath './package-data.txt').Hash\nif ($actual -eq $expected) { Write-Output 'CAL_SLOW_OK'; exit 0 }\nWrite-Output 'CAL_SLOW_FAIL'; exit 5\n"
+    },
+    "expected_first_command_fragment": "verify-package.ps1",
+    "boundary_detector": {"kind": "none"},
+    "post_condition": {
+      "kind": "tool_output_marker",
+      "pass_marker": "CAL_SLOW_OK",
+      "fail_marker": "CAL_SLOW_FAIL"
+    }
+  }
+]

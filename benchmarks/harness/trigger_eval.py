@@ -15,8 +15,12 @@ SKILL_PATH_RE = re.compile(
 ALIASED_SKILL_RE = re.compile(r"\br\d+[\\/]([^\\/'\"\s]+)[\\/]SKILL\.md", re.IGNORECASE)
 PSR_SKILL = "powershell-reliability"
 PSR_MCP = "mcp__psr_reliability_native__"
-SHELL_CALL = "tools.shell_command"
+SHELL_CALLS = ("tools.shell_command", "tools.exec_command")
 VALID_GROUPS = {"should_trigger", "should_not_trigger", "boundary"}
+
+
+def _is_shell_call(call_input: str) -> bool:
+    return any(name in call_input for name in SHELL_CALLS)
 
 
 def _sha256_text(value: str) -> str:
@@ -70,24 +74,42 @@ def _first_payload(rows: list[dict], record_type: str) -> dict:
     return {}
 
 
-def _case_user_message(rows: list[dict]) -> tuple[str | None, str]:
+def _first_user_message(rows: list[dict]) -> str:
     for row in rows:
         if row.get("type") != "event_msg":
             continue
         payload = row.get("payload") or {}
-        if payload.get("type") != "user_message":
-            continue
-        message = payload.get("message") or ""
-        match = CASE_RE.search(message)
-        if match:
-            return match.group(1).upper(), message
-    return None, ""
+        if payload.get("type") == "user_message":
+            return payload.get("message") or ""
+    return ""
 
 
-def extract_rollout(rows: list[dict], rollout_path: pathlib.Path) -> dict | None:
+def _case_user_message(rows: list[dict]) -> tuple[str | None, str]:
+    message = _first_user_message(rows)
+    match = CASE_RE.search(message)
+    if match:
+        return match.group(1).upper(), message
+    return None, message
+
+
+def _desktop_prompt_text(message: str) -> str:
+    if message.endswith("\r\n"):
+        return message[:-2]
+    if message.endswith("\n"):
+        return message[:-1]
+    return message
+
+
+def extract_rollout(
+    rows: list[dict],
+    rollout_path: pathlib.Path,
+    expected_case_key: str | None = None,
+) -> dict | None:
     case_key, user_message = _case_user_message(rows)
     if case_key is None:
-        return None
+        if expected_case_key is None or not user_message:
+            return None
+        case_key = expected_case_key
     session_meta = _first_payload(rows, "session_meta")
     turn_context = _first_payload(rows, "turn_context")
     world_state = _first_payload(rows, "world_state")
@@ -113,7 +135,7 @@ def extract_rollout(rows: list[dict], rollout_path: pathlib.Path) -> dict | None
             selected_skills.extend(names)
             if PSR_MCP in call_input:
                 reliability_calls.append(call)
-            if first_command is None and SHELL_CALL in call_input:
+            if first_command is None and _is_shell_call(call_input):
                 first_command = call
         elif payload.get("type") == "custom_tool_call_output":
             outputs_by_call_id[payload.get("call_id")] = _flatten_text(payload.get("output"))
@@ -150,7 +172,7 @@ def extract_rollout(rows: list[dict], rollout_path: pathlib.Path) -> dict | None
         "approval_policy": turn_context.get("approval_policy"),
         "sandbox_type": sandbox.get("type") if isinstance(sandbox, dict) else None,
         "psr_available_in_catalog": "powershell-reliability:" in host_skills.lower(),
-        "prompt_sha256": _sha256_text(user_message),
+        "prompt_sha256": _sha256_text(_desktop_prompt_text(user_message)),
         "psr_skill_selected": PSR_SKILL in selected_unique,
         "psr_skill_read_count": sum(name == PSR_SKILL for name in selected_skills),
         "psr_skill_selected_before_first_command": selected_before,

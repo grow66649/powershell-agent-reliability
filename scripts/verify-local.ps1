@@ -50,7 +50,7 @@ Invoke-VerificationStep "release lifecycle" {
 Invoke-VerificationStep "benchmark scorer tests" {
     Push-Location $harness
     try {
-        & python -m unittest test_score_ab.py test_trigger_eval.py test_routing_eval.py
+        & python -m unittest test_score_ab.py test_trigger_eval.py test_routing_eval.py test_routing_dataset.py
     }
     finally {
         Pop-Location
@@ -65,7 +65,7 @@ if (-not $SkipBaseline) {
 Invoke-VerificationStep "python compile" {
     Push-Location $harness
     try {
-        & python -m py_compile score_ab.py test_score_ab.py trigger_eval.py test_trigger_eval.py routing_eval.py test_routing_eval.py run_baseline.py fixture_worker.py
+        & python -m py_compile score_ab.py test_score_ab.py trigger_eval.py test_trigger_eval.py routing_eval.py test_routing_eval.py routing_dataset.py test_routing_dataset.py run_baseline.py fixture_worker.py
     }
     finally {
         Pop-Location

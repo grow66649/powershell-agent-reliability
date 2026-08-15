@@ -41,9 +41,13 @@ The harness never infers an eligible boundary from assistant prose. Command outc
 
 ## Deterministic task post-condition
 
-A case may freeze `post_condition.kind=none` or `post_condition.kind=tool_output_marker` before execution. `tool_output_marker` requires distinct non-empty `pass_marker` and `fail_marker` values. The collector considers only matching `custom_tool_call_output` evidence and uses the latest matching deterministic output; assistant prose is never post-condition evidence.
+New core artifact tasks freeze `post_condition.kind=workspace_state`; `post_condition.kind=none` is reserved for reviewed non-artifact routing/diagnosis cases. `workspace_state` is evaluator-owned and supports `mode=all|any` over `file_exists`, `file_absent`, `directory_exists`, `file_sha256`, and `file_size` checks. All check paths are relative paths under the exact trial workspace. The harness validates containment after fixture materialization and re-resolves each target again at grading time so a later redirect cannot escape the disposable workspace.
 
-The normalized record stores `post_condition_passed` as `true`, `false`, or missing (`null`) plus the bounded evidence index/timestamp. Missing evidence remains missing. If one tool output contains both frozen pass and fail markers, the trial is invalid as ambiguous. The frozen markers are never rewritten from repair output or assistant claims.
+Workspace grading is read-only and bounded. Hashing reads at most 64 MiB per file in bounded chunks. Normal missing files, wrong types, size/hash mismatches, access failures, or hash-size-cap hits are task-level failed checks; malformed rules or path escape invalidate the post-condition evidence. Normalized evidence stores only bounded observations and a hash of the resolved path, never the raw absolute path. In normalized evidence, assistant prose is never post-condition evidence.
+
+`tool_output_marker is legacy-only`: it remains readable for historical campaigns but is not eligible to admit a new core artifact-scored case. Legacy markers still require distinct non-empty pass/fail values and only matching tool output can satisfy them.
+
+The normalized record stores `post_condition_passed`, `post_condition_evidence_source`, bounded `post_condition_checks`, and legacy evidence index/timestamp when applicable. Missing evidence remains missing. Boundary detection and final completion grading remain separate facts: final grading does not create an earlier routing boundary.
 
 ## Normalized record
 
@@ -108,6 +112,24 @@ Gate states are `PASS`, `FAIL`, and `UNRESOLVED`. Production shadow remains `NOT
 Train may inform a later separately reviewed routing-description revision. Validation and holdout are evaluation-only; their outcomes cannot change routing descriptions, thresholds, or scorer semantics under the same frozen identity.
 
 The future 24-case core is frozen only by the separate dataset/campaign plan. The unseen holdout stays outside the train-visible repository surface until train-driven changes are frozen.
+
+## Sealed validation and holdout visibility
+
+Validation prompts, fixtures, expected routing, post-condition specifics, provenance metadata, and review rows remain outside the train-visible repository surface until the candidate routing revision is frozen. The owner may review validation before sealing, but any session allowed to modify Skill/MCP routing after train evidence must not see validation content before that routing revision is frozen. Validation outcomes evaluate that frozen revision and cannot tune it. Any routing change after validation exposure requires a new isolated evaluation revision.
+
+Holdout material is created from a fresh unseen candidate pool only after train-driven routing changes are frozen. Holdout prompts, fixtures, and review metadata remain outside the train/validation-visible repository surface until the holdout is ready to run. Validation and holdout scheduled attempts are not discretionarily retried; missing valid evidence remains UNRESOLVED rather than being selectively resampled.
+
+## Canary and timeout calibration evidence
+
+Before scored execution, S must prove the companion Skill is visible and the intended Reliability MCP is reachable. M must prove, through a supported reversible setup, that the companion Skill is absent while the exact same Reliability MCP remains reachable. If that state cannot be established, the campaign is `BLOCKED` rather than simulated. Restore S afterward to prove reversibility.
+
+Timeout calibration uses exactly 3 representative task shapes x 2 arms x 2 repeats = 12 valid non-scored turns. Canary and calibration evidence never enters recall, false-activation, token-cost, task-completion, or routing-winner denominators.
+
+The scored wall-time budget is frozen before the first scored train turn as:
+
+`T = ceil_to_30_seconds(2 * max(valid_calibration_turn_duration))`
+
+All 12 valid durations and the resulting T are recorded before scored execution. The same T applies to S and M through train and validation. If train evidence shows T structurally censors valid tasks, stop and create a new campaign revision; never change T mid-validation or retroactively rescore earlier rows.
 
 ## Evidence hygiene
 

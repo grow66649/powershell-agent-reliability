@@ -1,7 +1,9 @@
+import hashlib
 import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 import routing_eval
 
@@ -147,6 +149,22 @@ def _mcp_row(timestamp="2026-08-14T00:00:04Z"):
 
 
 class RoutingEvalTemporalTests(unittest.TestCase):
+    def test_current_desktop_exec_command_counts_as_first_command(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("R00-T01", "M", workspace)
+            rows = _base_rollout("R00-T01", workspace, skill_visible=False) + [
+                _tool(
+                    "cmd1",
+                    "const r = await tools.exec_command({cmd:'pwsh.exe -NoProfile -File .\\\\task.ps1'}); text(r.output);",
+                    "2026-08-14T00:00:01Z",
+                ),
+                _output("cmd1", "CONFIG_MISSING", "2026-08-14T00:00:02Z"),
+            ]
+            record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
+        self.assertIsNotNone(record["first_attempt_start_index"])
+        self.assertNotIn("first_command_mismatch", record["invalid_reasons"])
+
     def test_s_failure_skill_then_mcp_is_valid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = pathlib.Path(temp_dir)
@@ -276,6 +294,20 @@ class RoutingEvalCollectionTests(unittest.TestCase):
             records = routing_eval.collect_rollouts(root, manifest)
         self.assertEqual(records, [])
 
+    def test_collect_rejects_malformed_rollout_bound_to_manifest_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            workspace = root / "expected"
+            workspace.mkdir()
+            manifest = [_manifest_row("R03-T01", "M", workspace)]
+            rows = _base_rollout("R03-T01", workspace, skill_visible=False)
+            path = root / "rollout-malformed.jsonl"
+            with path.open("w", encoding="utf-8", newline="\n") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+                handle.write('{"broken":\n')
+            with self.assertRaisesRegex(ValueError, "malformed rollout for manifest workspace"):
+                routing_eval.collect_rollouts(root, manifest)
     def test_collect_rejects_duplicate_same_arm_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -287,6 +319,41 @@ class RoutingEvalCollectionTests(unittest.TestCase):
             routing_eval.trigger_eval.write_jsonl(root / "rollout-b.jsonl", rows)
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 routing_eval.collect_rollouts(root, manifest)
+
+    def test_collect_binds_markerless_calibration_prompt_by_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            workspace = root / "calibration" / "M" / "cal-read-existing-state-T01"
+            workspace.mkdir(parents=True)
+            manifest = [_manifest_row("R04-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})]
+            manifest[0]["case_key"] = "cal-read-existing-state-T01"
+            manifest[0]["case_id"] = "cal-read-existing-state"
+            manifest[0]["prompt_sha256"] = routing_eval.trigger_eval._sha256_text("Check config-status.txt")
+            rows = _base_rollout("R04-T01", workspace, skill_visible=False)
+            rows[3]["payload"]["message"] = "Check config-status.txt\n"
+            routing_eval.trigger_eval.write_jsonl(root / "rollout-calibration.jsonl", rows)
+            records = routing_eval.collect_rollouts(root, manifest)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["case_key"], "cal-read-existing-state-T01")
+        self.assertTrue(records[0]["valid"])
+        self.assertEqual(records[0]["prompt_sha256"], manifest[0]["prompt_sha256"])
+
+    def test_collect_preserves_non_newline_prompt_whitespace_drift(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            workspace = root / "calibration" / "M" / "cal-slower-verification-T01"
+            workspace.mkdir(parents=True)
+            manifest = [_manifest_row("R05-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})]
+            manifest[0]["case_key"] = "cal-slower-verification-T01"
+            manifest[0]["case_id"] = "cal-slower-verification"
+            manifest[0]["prompt_sha256"] = routing_eval.trigger_eval._sha256_text("Run verify-package.ps1")
+            rows = _base_rollout("R05-T01", workspace, skill_visible=False)
+            rows[3]["payload"]["message"] = "Run verify-package.ps1 \n"
+            routing_eval.trigger_eval.write_jsonl(root / "rollout-drift.jsonl", rows)
+            records = routing_eval.collect_rollouts(root, manifest)
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["valid"])
+        self.assertIn("prompt_hash_mismatch", records[0]["invalid_reasons"])
 
 
 def _token_row(total, timestamp="2026-08-14T00:00:00Z", **overrides):
@@ -601,11 +668,17 @@ class RoutingEvalRepositoryContractTests(unittest.TestCase):
             "pair identity drift invalidates both arms",
             "post_condition_passed",
             "tool_output_marker",
+            "workspace_state",
+            "evaluator-owned",
+            "relative paths under the exact trial workspace",
+            "tool_output_marker is legacy-only",
+            "final grading does not create an earlier routing boundary",
             "assistant prose is never post-condition evidence",
             "wrong_repair review coverage",
         ]
         for phrase in required:
             self.assertIn(phrase, combined)
+        self.assertNotIn("post_condition.kind=none` or `post_condition.kind=tool_output_marker", contract)
 
 
 class RoutingEvalReviewPairConsistencyTests(unittest.TestCase):
@@ -663,6 +736,120 @@ class RoutingEvalReviewPostConditionTests(unittest.TestCase):
             "pass_marker": "POST-CONDITION: PASS",
             "fail_marker": "POST-CONDITION: FAIL",
         }
+
+    def _workspace_state(self):
+        return {
+            "kind": "workspace_state",
+            "mode": "all",
+            "checks": [
+                {"kind": "file_exists", "path": "result.txt"},
+                {"kind": "file_size", "path": "result.txt", "min_bytes": 1, "max_bytes": 64},
+            ],
+        }
+
+    def test_prepare_freezes_declared_workspace_state_rule(self):
+        case = _case("P00", lane="validation")
+        case["post_condition"] = self._workspace_state()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+        self.assertEqual(rows[0]["post_condition"], self._workspace_state())
+        self.assertEqual(rows[0]["post_condition"], rows[1]["post_condition"])
+
+    def test_prepare_rejects_workspace_state_parent_escape(self):
+        case = _case("P00E", lane="validation")
+        case["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "../outside.txt"}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "workspace-state"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
+    def test_prepare_rejects_workspace_state_absolute_path(self):
+        case = _case("P00A", lane="validation")
+        case["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "C:/outside.txt"}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "workspace-state"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
+    def test_prepare_rejects_workspace_state_bad_sha256(self):
+        case = _case("P00S", lane="validation")
+        case["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_sha256", "path": "result.txt", "expected_sha256": "not-a-sha"}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "sha256"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
+    def test_prepare_rejects_workspace_state_unknown_check(self):
+        case = _case("P00U", lane="validation")
+        case["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "mystery", "path": "result.txt"}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "workspace-state"):
+                routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
+
+    def test_workspace_state_ignores_agent_pass_marker_when_file_is_wrong(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            (workspace / "result.txt").write_text("STALE\n", encoding="utf-8")
+            manifest = _manifest_row("P06-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})
+            manifest["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_sha256", "path": "result.txt", "expected_sha256": hashlib.sha256(b"READY\n").hexdigest()}]}
+            rows = _base_rollout("P06-T01", workspace, skill_visible=False) + [_output("x", "POST-CONDITION: PASS", "2026-08-14T00:00:05Z")]
+            record = routing_eval.extract_trial(rows, pathlib.Path("p06.jsonl"), manifest)
+        self.assertFalse(record["post_condition_passed"])
+        self.assertEqual(record["post_condition_evidence_source"], "evaluator_workspace")
+
+    def test_workspace_state_supports_file_absent_directory_size_and_any(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            (workspace / "result.txt").write_bytes(b"READY")
+            (workspace / "folder").mkdir()
+            manifest = _manifest_row("P07-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})
+            manifest["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}, {"kind": "file_absent", "path": "missing.txt"}, {"kind": "directory_exists", "path": "folder"}, {"kind": "file_size", "path": "result.txt", "min_bytes": 5, "max_bytes": 5}]}
+            record = routing_eval.extract_trial(_base_rollout("P07-T01", workspace, skill_visible=False), pathlib.Path("p07.jsonl"), manifest)
+            self.assertTrue(record["post_condition_passed"])
+            manifest["post_condition"] = {"kind": "workspace_state", "mode": "any", "checks": [{"kind": "file_exists", "path": "missing.txt"}, {"kind": "file_exists", "path": "result.txt"}]}
+            any_record = routing_eval.extract_trial(_base_rollout("P07-T01", workspace, skill_visible=False), pathlib.Path("p07-any.jsonl"), manifest)
+        self.assertTrue(any_record["post_condition_passed"])
+
+    def test_workspace_state_missing_file_is_failed_check_not_invalid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("P08-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})
+            manifest["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "missing.txt"}]}
+            record = routing_eval.extract_trial(_base_rollout("P08-T01", workspace, skill_visible=False), pathlib.Path("p08.jsonl"), manifest)
+        self.assertFalse(record["post_condition_passed"])
+        self.assertTrue(record["valid"])
+        self.assertEqual(record["invalid_reasons"], [])
+
+    def test_workspace_state_hash_cap_is_bounded_failed_check(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            target = workspace / "large.bin"
+            target.write_bytes(b"12345678")
+            manifest = _manifest_row("P09-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})
+            manifest["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_sha256", "path": "large.bin", "expected_sha256": hashlib.sha256(b"12345678").hexdigest()}]}
+            original = routing_eval.MAX_POST_CONDITION_HASH_BYTES
+            routing_eval.MAX_POST_CONDITION_HASH_BYTES = 4
+            try:
+                record = routing_eval.extract_trial(_base_rollout("P09-T01", workspace, skill_visible=False), pathlib.Path("p09.jsonl"), manifest)
+            finally:
+                routing_eval.MAX_POST_CONDITION_HASH_BYTES = original
+        self.assertFalse(record["post_condition_passed"])
+        self.assertTrue(record["valid"])
+        self.assertEqual(record["post_condition_checks"][0]["error_kind"], "hash_size_limit")
+
+    def test_workspace_state_access_error_does_not_pass_file_absent(self):
+        target = pathlib.Path("inaccessible.txt")
+        with mock.patch("os.stat", side_effect=PermissionError("denied")):
+            result = routing_eval._workspace_check_evidence(0, {"kind": "file_absent", "path": "inaccessible.txt"}, target)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["status"], "access_error")
+        self.assertEqual(result["error_kind"], "PermissionError")
+
+    def test_workspace_state_failure_does_not_create_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("P10-T01", "M", workspace, group="should_not_trigger", detector={"kind": "none"})
+            manifest["post_condition"] = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "missing.txt"}]}
+            record = routing_eval.extract_trial(_base_rollout("P10-T01", workspace, skill_visible=False), pathlib.Path("p10.jsonl"), manifest)
+        self.assertIsNone(record["eligible_boundary_index"])
+        self.assertFalse(record["post_condition_passed"])
 
     def test_prepare_freezes_declared_post_condition_rule(self):
         case = _case("P01", lane="validation")
@@ -748,12 +935,12 @@ class RoutingEvalReviewReportCompletenessTests(unittest.TestCase):
 
 
 class RoutingEvalReviewPostConditionEndToEndTests(unittest.TestCase):
-    def test_prepare_collect_score_carries_deterministic_post_condition(self):
+    def test_prepare_collect_score_uses_evaluator_workspace_state(self):
         case = _case("P05", lane="validation")
         case["post_condition"] = {
-            "kind": "tool_output_marker",
-            "pass_marker": "POST-CONDITION: PASS",
-            "fail_marker": "POST-CONDITION: FAIL",
+            "kind": "workspace_state",
+            "mode": "all",
+            "checks": [{"kind": "file_sha256", "path": "result.txt", "expected_sha256": hashlib.sha256(b"READY\n").hexdigest()}],
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -762,16 +949,16 @@ class RoutingEvalReviewPostConditionEndToEndTests(unittest.TestCase):
             sessions.mkdir()
             for row in manifest:
                 workspace = pathlib.Path(row["workspace"])
+                workspace.joinpath("result.txt").write_bytes(b"READY\n" if row["arm"] == "S" else b"STALE\n")
                 rows = _base_rollout(row["case_key"], workspace, skill_visible=row["arm"] == "S")
                 rows += _failed_command_rows()
                 if row["arm"] == "S":
                     rows += [_skill_row()]
-                rows += [_mcp_row()]
-                marker = "POST-CONDITION: PASS" if row["arm"] == "S" else "POST-CONDITION: FAIL"
-                rows += [_output("verify", marker, "2026-08-14T00:00:05Z")]
+                rows += [_mcp_row(), _output("verify", "POST-CONDITION: PASS", "2026-08-14T00:00:05Z")]
                 routing_eval.trigger_eval.write_jsonl(sessions / f"rollout-{row['sequence']}.jsonl", rows)
             records = routing_eval.collect_rollouts(sessions, manifest)
             report = routing_eval.score_records(records)
         self.assertEqual({row["arm"]: row["post_condition_passed"] for row in records}, {"S": True, "M": False})
+        self.assertTrue(all(row["post_condition_evidence_source"] == "evaluator_workspace" for row in records))
         self.assertEqual(report["arms"]["S"]["lanes"]["admission"]["deterministic_post_condition_completion_rate"], 1.0)
         self.assertEqual(report["arms"]["M"]["lanes"]["admission"]["deterministic_post_condition_completion_rate"], 0.0)

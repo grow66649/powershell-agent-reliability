@@ -48,7 +48,52 @@ python .\benchmarks\harness\routing_eval.py prepare `
   --trials 3 --seed <frozen-seed>
 ```
 
-Record the generated manifest hash before running scored turns. If a case declares a deterministic post-condition, freeze its `post_condition` rule and exact pass/fail markers before execution; do not derive or revise those criteria from later model output.
+Record the generated manifest hash before running scored turns. New core artifact cases freeze an evaluator-owned `workspace_state` rule before execution. Those rules use only the five bounded file-state checks defined by the contract and relative paths under the exact trial workspace; do not derive or revise completion criteria from later model output.
+## 4A. Review and seal the train/validation package
+
+Before any scored execution, the owner reviews every core case row: natural-task rationale, provenance cluster, expected routing, fixture, boundary detector, deterministic post-condition, leakage checks, and safety/privacy checks. Only rows approved before S/M outcome visibility are eligible.
+
+Keep the 14 train cases/reviews in the train-visible repository surface. Keep the 10 validation prompts, fixtures, provenance metadata, and reviews host-local and sealed by hash from any session allowed to modify routing after train evidence. Validation remains sealed until the candidate routing revision is frozen. Validation outcomes cannot tune that same revision.
+
+Validation and holdout scheduled attempts are not discretionarily retried. A setup abort may be replaced only when detected before prompt submission. After prompt submission, a timeout, routing miss, wrong repair, or task failure is a valid outcome unless protocol evidence itself is invalid.
+
+## 4B. Prove S/M canaries and reversibility
+
+1. In a fresh S thread, verify the observed Skill catalog contains `powershell-reliability` and verify the intended Reliability MCP surface is reachable.
+2. Establish M only through a supported reversible configuration. In a fresh M thread, verify the Skill catalog does not contain `powershell-reliability` while the exact same Reliability MCP candidate remains reachable.
+3. Restore S and repeat the visibility/reachability proof.
+
+If M cannot be established without renaming/moving Skill files, hiding catalog evidence, weakening unrelated security/global settings, or otherwise simulating absence, set campaign status to `BLOCKED` and stop.
+
+## 4C. Run the 12-turn timeout calibration lane
+
+Prepare the reviewed calibration set with two repeats per case:
+
+```powershell
+python .\benchmarks\harness\routing_eval.py prepare `
+  --cases .\benchmarks\routing_eval\calibration_cases.json `
+  --output-root <host-local-calibration-root> `
+  --trials 2 --seed 20260814
+```
+
+Execute all 12 manifest rows in fresh threads/workspaces under the same Desktop build, model, effort, approval, sandbox, MCP executable, and measurement policy planned for scored trials. Canary/calibration prompts must not use validation or holdout material.
+
+Collect normalized records, then freeze T:
+
+```powershell
+python .\benchmarks\harness\routing_dataset.py freeze-timeout `
+  --records <host-local-calibration-records> `
+  --output <host-local-timeout-freeze>
+```
+
+The helper requires exactly 3 task shapes x 2 arms x 2 repeats = 12 valid turns and computes `T = ceil_to_30_seconds(2 * max(valid_calibration_turn_duration))`. Record the 12 durations, record/hash, and T before the first scored train row. The same T applies to S and M through train and validation. A safety-ceiling hit or infrastructure fault blocks timeout freeze for review rather than silently shrinking the evidence set.
+
+## 4D. Execute train before revealing validation
+
+Prepare and run only the train package with three repeats per arm under the frozen runtime identity and T. Train may motivate a separately reviewed routing revision. If routing changes, freeze the new routing identity before validation is revealed.
+
+Only after the candidate routing revision is frozen may the sealed validation package be opened to the evaluation runner/reviewer. After validation closes, create the fresh unseen holdout pool; holdout remains evaluation-only and cannot tune the same revision. Case-level post-run human review is required before selecting S or M.
+
 ## 5. Execute manifest rows in normal Desktop
 
 For every manifest row:
@@ -74,7 +119,7 @@ python .\benchmarks\harness\routing_eval.py collect `
   --report <host-local-evidence-root>\collect-report.json
 ```
 
-Review expected, collected, invalid, and remaining counts plus the next prompt/workspace pointers. Wrong workspace, duplicate identity, prompt drift, or arm-catalog mismatch is not repaired in place; preserve evidence and stop the affected batch.
+Review expected, collected, invalid, and remaining counts plus the next prompt/workspace pointers. Collection binds the rollout to its exact manifest workspace first, then reads final workspace state directly for `workspace_state` grading. It does not run a verifier command and does not ask the agent to self-report pass/fail. Wrong workspace, duplicate identity, prompt drift, or arm-catalog mismatch is not repaired in place; preserve evidence and stop the affected batch.
 ## 7. Stop on hard guardrails
 
 Stop the affected frozen revision immediately if a valid trial shows any pre-boundary Reliability MCP use, a Reliability-caused wrong repair, or a Reliability-caused false completion. Preserve the evidence; do not patch validation/holdout behavior and continue under the same identity.
@@ -108,6 +153,6 @@ Main merge, release packaging, plugin/default recommendation, and always-on reco
 
 For each matched `(case_id, trial_id)` pair, preserve the same prompt/fixture identity, model, effort, approval policy, sandbox type, Desktop/CLI runtime identity, and Desktop originator. If collection shows missing identity evidence or cross-arm drift, treat that pair as invalid evidence; do not include either arm in performance denominators.
 
-For cases with a frozen `post_condition.kind=tool_output_marker`, only the declared deterministic validator's matching tool-output marker is eligible evidence. Assistant prose or a self-reported completion claim never establishes the task post-condition. Keep the frozen pass/fail markers unchanged after the campaign starts.
+For new core artifact cases, `workspace_state` is the only admitted deterministic completion mechanism. The evaluator reads bounded final file state from the already-bound disposable workspace; assistant prose or a self-reported completion claim never establishes the task post-condition. `tool_output_marker is legacy-only` for historical campaign compatibility and is not eligible for new-core artifact admission. Final completion grading stays separate from routing evidence: final grading does not create an earlier routing boundary.
 
 When reviewing the score report, inspect ordinary `wrong_repair` and `false_completion` counts and review coverage separately from `reliability_caused_wrong_repair` and `reliability_caused_false_completion`. Causal attribution requires its own bounded human decision and evidence reference.
