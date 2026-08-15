@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Written design spec=`docs/superpowers/specs/2026-08-14-r4-evaluator-owned-world-state-design.md` at owner-approved commit `a289350251bb4dcf1c37f340485fd05203bd3cc5`.
-- Work only in isolated worktree `D:/Work/powershell-agent-reliability/.worktrees/r4-core-v2-revision-20260814`, branch `docs/r4-core-v2-revision-20260814`.
+- Work only in isolated worktree `<repo-worktree>`, branch `docs/r4-core-v2-revision-20260814`.
 - S=`thin companion Skill + same Reliability MCP`; M=`Skill absent + same Reliability MCP`; H remains excluded.
 - Do not change Rust/MCP/Skill routing behavior, scorer thresholds, security/approval policy, release/publication state, or the approved 12-turn timeout calibration rule.
 - This validation-exposed session may change evaluator/dataset validity only; it may never tune Skill/MCP routing after train evidence.
@@ -331,8 +331,8 @@ git commit -m "test: enforce r4 core v3 evidence quality"
 ### Task 6: Execute the sealed host-local core-v3 revision
 
 **Files:**
-- Read only in this validation-exposed Leader: `D:/Codex/evidence/ai-boundary-lab/r4-naturalistic-campaign-v3-20260814/private-case-revision-plan.md`
-- Host-local outputs stay under: `D:/Codex/evidence/ai-boundary-lab/r4-naturalistic-campaign-v3-20260814/`
+- Read only in this validation-exposed Leader: `<evidence-root>/r4-naturalistic-campaign-v3-20260814/private-case-revision-plan.md`
+- Host-local outputs stay under: `<evidence-root>/r4-naturalistic-campaign-v3-20260814/`
 - Repo: no train/validation case data, exact prompt/fixture details, first-failure previews, or validation provenance are committed.
 
 **Interfaces:**
@@ -345,7 +345,7 @@ The executor must be this already validation-exposed dataset/evaluator Leader or
 
 - [ ] **Step 2: Execute the private case-revision plan exactly.**
 
-Use `D:/Codex/evidence/ai-boundary-lab/r4-naturalistic-campaign-v3-20260814/private-case-revision-plan.md`. That host-local plan contains the exact case replacements, prompts, fixtures, first-failure qualification commands, provenance mapping, post-condition rules, deterministic seed, and evidence-hash list intentionally omitted here.
+Use `<evidence-root>/r4-naturalistic-campaign-v3-20260814/private-case-revision-plan.md`. That host-local plan contains the exact case replacements, prompts, fixtures, first-failure qualification commands, provenance mapping, post-condition rules, deterministic seed, and evidence-hash list intentionally omitted here.
 
 - [ ] **Step 3: Run the frozen-core validator without copying validation into the repository.**
 

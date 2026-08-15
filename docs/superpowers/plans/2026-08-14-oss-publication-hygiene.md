@@ -354,7 +354,7 @@ Expected: zero private-identity/user-profile hits in the current tree.
 - [ ] **Step 3: Scan for credential/raw-evidence patterns**
 
 ```powershell
-git grep -n -i -E "(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization: bearer|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|codex.*sessions|D:/Codex/evidence)" -- .
+git grep -n -i -E "(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization: bearer|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|codex.*sessions|<host-evidence-root>)" -- .
 ```
 
 Inspect every hit manually. Documentation may discuss evidence concepts, but no live token, credential, session path, or private evidence path is allowed.

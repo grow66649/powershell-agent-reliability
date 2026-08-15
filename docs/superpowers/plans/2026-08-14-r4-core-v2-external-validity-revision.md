@@ -38,7 +38,7 @@
 ### Task 2: Build the v2 candidate pool host-locally without S/M outcomes
 
 **Files:**
-- Host-local create: `D:/Codex/evidence/ai-boundary-lab/r4-naturalistic-campaign-v2-20260814/build_candidate_pool_v2.py`
+- Host-local create: `<evidence-root>/r4-naturalistic-campaign-v2-20260814/build_candidate_pool_v2.py`
 - Host-local outputs: candidate/review/core/train/validation JSON/JSONL and freeze summaries under the same root.
 - Repo: no case-data commit in this task.
 
