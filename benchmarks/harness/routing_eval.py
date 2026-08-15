@@ -521,6 +521,20 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
     return record
 
 
+def _malformed_rollout_cwd(path: pathlib.Path) -> str | None:
+    rows = []
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(value, dict):
+            break
+        rows.append(value)
+    return _turn_cwd(rows)
+
 def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[dict]:
     manifest_index = {}
     for row in manifest:
@@ -533,7 +547,10 @@ def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[
     for path in sorted(sessions_root.rglob("rollout-*.jsonl")):
         try:
             rows = trigger_eval.load_jsonl(path)
-        except ValueError:
+        except ValueError as exc:
+            malformed_cwd = _malformed_rollout_cwd(path)
+            if malformed_cwd is not None and workspace_identity(malformed_cwd) in manifest_index:
+                raise ValueError(f"malformed rollout for manifest workspace {malformed_cwd}") from exc
             continue
         cwd = _turn_cwd(rows)
         if cwd is None:

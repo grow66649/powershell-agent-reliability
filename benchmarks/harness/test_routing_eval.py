@@ -294,6 +294,20 @@ class RoutingEvalCollectionTests(unittest.TestCase):
             records = routing_eval.collect_rollouts(root, manifest)
         self.assertEqual(records, [])
 
+    def test_collect_rejects_malformed_rollout_bound_to_manifest_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            workspace = root / "expected"
+            workspace.mkdir()
+            manifest = [_manifest_row("R03-T01", "M", workspace)]
+            rows = _base_rollout("R03-T01", workspace, skill_visible=False)
+            path = root / "rollout-malformed.jsonl"
+            with path.open("w", encoding="utf-8", newline="\n") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+                handle.write('{"broken":\n')
+            with self.assertRaisesRegex(ValueError, "malformed rollout for manifest workspace"):
+                routing_eval.collect_rollouts(root, manifest)
     def test_collect_rejects_duplicate_same_arm_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
