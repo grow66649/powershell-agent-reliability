@@ -1,0 +1,672 @@
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+import routing_eval
+
+TOP_LEVEL_ALLOWLIST = (
+    "approval_policy",
+    "disable_response_storage",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "model_verbosity",
+    "sandbox_mode",
+    "service_tier",
+    "model_provider",
+    "model",
+)
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+
+def load_live_config(path: pathlib.Path) -> dict:
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def _toml_literal(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
+    if isinstance(value, dict):
+        parts = [f"{key} = {_toml_literal(item)}" for key, item in value.items()]
+        return "{ " + ", ".join(parts) + " }"
+    raise ValueError(f"unsupported TOML value type: {type(value).__name__}")
+
+
+def build_profile_text(
+    live: dict,
+    arm: str,
+    skill_path: str,
+    mcp_path: str,
+    disabled_skill_paths=(),
+) -> str:
+    if arm not in {"S", "M"}:
+        raise ValueError("arm must be S or M")
+    provider_name = live.get("model_provider")
+    provider = (live.get("model_providers") or {}).get(provider_name)
+    if not isinstance(provider, dict):
+        raise ValueError("selected model provider table is missing")
+    mcp = (live.get("mcp_servers") or {}).get("psr_reliability_native")
+    if not isinstance(mcp, dict):
+        raise ValueError("psr_reliability_native MCP config is missing")
+
+    lines = []
+    for key in TOP_LEVEL_ALLOWLIST:
+        if key in live:
+            lines.append(f"{key} = {_toml_literal(live[key])}")
+    lines.extend(["", "[features]", "plugins = false", "apps = false", "remote_plugin = false", "plugin_sharing = false"])
+    if (live.get("features") or {}).get("fast_mode") is not None:
+        lines.append(f"fast_mode = {_toml_literal(bool(live['features']['fast_mode']))}")
+    lines.extend(["", f"[model_providers.{provider_name}]"])
+    for key, value in provider.items():
+        lines.append(f"{key} = {_toml_literal(value)}")
+
+    lines.extend(["", "[mcp_servers.psr_reliability_native]"])
+    lines.append(f"command = {_toml_literal(mcp_path)}")
+    lines.append(f"args = {_toml_literal(mcp.get('args', []))}")
+    for key in ("startup_timeout_sec", "tool_timeout_sec", "enabled"):
+        if key in mcp:
+            lines.append(f"{key} = {_toml_literal(mcp[key])}")
+
+    skill_states = {str(path): False for path in disabled_skill_paths}
+    skill_states[str(skill_path)] = arm == "S"
+    for path, enabled in sorted(skill_states.items(), key=lambda item: item[0].casefold()):
+        lines.extend(["", "[[skills.config]]"])
+        lines.append(f"path = {_toml_literal(path)}")
+        lines.append(f"enabled = {_toml_literal(enabled)}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def profile_receipt(live: dict, arm: str, config_sha256: str, mcp_sha256: str, skill_sha256: str) -> dict:
+    provider_name = live.get("model_provider")
+    provider = (live.get("model_providers") or {}).get(provider_name) or {}
+    return {
+        "schema_version": 1,
+        "arm": arm,
+        "model": live.get("model"),
+        "provider": provider_name,
+        "provider_base_url": provider.get("base_url"),
+        "provider_wire_api": provider.get("wire_api"),
+        "effort": live.get("model_reasoning_effort"),
+        "approval_policy": live.get("approval_policy"),
+        "sandbox_mode": live.get("sandbox_mode"),
+        "config_sha256": config_sha256,
+        "mcp_sha256": mcp_sha256,
+        "skill_sha256": skill_sha256,
+    }
+
+
+def _flatten_prompt_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(filter(None, (_flatten_prompt_text(item) for item in value)))
+    if isinstance(value, dict):
+        parts = []
+        if isinstance(value.get("text"), str):
+            parts.append(value["text"])
+        for key in ("content", "body", "message"):
+            if key in value:
+                parts.append(_flatten_prompt_text(value[key]))
+        return "\n".join(filter(None, parts))
+    return ""
+
+
+_SKILL_LINE = re.compile(
+    r"^-\s+([^:\r\n]+):.*?\(file:\s*([^\r\n)]+)\)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_prompt_input_skills(payload) -> list[dict]:
+    text = _flatten_prompt_text(payload)
+    return [
+        {"name": match.group(1).strip(), "path": match.group(2).strip()}
+        for match in _SKILL_LINE.finditer(text)
+    ]
+
+
+def verify_arm_catalog(arm: str, skills: list[dict]) -> None:
+    names = [str(item.get("name", "")).strip().casefold() for item in skills]
+    psr_count = names.count("powershell-reliability")
+    unrelated = [name for name in names if name and name != "powershell-reliability"]
+    if arm == "S":
+        if psr_count != 1:
+            raise ValueError("S catalog must contain exactly one powershell-reliability Skill")
+        if unrelated:
+            raise ValueError(f"S catalog contains unrelated Skills: {unrelated}")
+    elif arm == "M":
+        if psr_count or unrelated:
+            raise ValueError("M catalog must contain no Skills")
+    else:
+        raise ValueError("arm must be S or M")
+
+
+def verify_mcp_profile(profile: dict) -> None:
+    servers = profile.get("mcp_servers")
+    if not isinstance(servers, dict) or set(servers) != {"psr_reliability_native"}:
+        raise ValueError("profile must contain exactly one MCP server: psr_reliability_native")
+    config = servers["psr_reliability_native"]
+    if not isinstance(config, dict) or not config.get("command"):
+        raise ValueError("psr_reliability_native MCP command is missing")
+    if config.get("enabled") is False:
+        raise ValueError("psr_reliability_native MCP must be enabled")
+
+
+def verify_cli_identity(exe: pathlib.Path, expected_version: str, expected_sha256: str, runner=subprocess.run) -> dict:
+    actual_hash = sha256_file(exe)
+    if actual_hash.casefold() != expected_sha256.casefold():
+        raise ValueError(f"CLI SHA256 mismatch: expected {expected_sha256}, got {actual_hash}")
+    completed = runner([str(exe), "--version"], capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise ValueError("CLI version probe failed")
+    match = re.search(r"(?:codex-cli\s+)?([^\s]+)", (completed.stdout or "").strip())
+    actual_version = match.group(1) if match else ""
+    if actual_version != expected_version:
+        raise ValueError(f"CLI version mismatch: expected {expected_version}, got {actual_version}")
+    return {"version": actual_version, "sha256": actual_hash, "path": str(exe)}
+
+
+def codex_argv(exe: pathlib.Path, workspace: pathlib.Path) -> list[str]:
+    return [exe.as_posix(), "exec", "--ephemeral", "--json", "-C", workspace.as_posix(), "-"]
+
+
+def remove_profile(profile: pathlib.Path) -> None:
+    if profile.exists():
+        shutil.rmtree(profile)
+    if profile.exists():
+        raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
+
+
+def _kill_process_tree_windows(process) -> None:
+    subprocess.run(
+        ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def run_codex_process(
+    exe: pathlib.Path,
+    workspace: pathlib.Path,
+    profile: pathlib.Path,
+    prompt_bytes: bytes,
+    stdout_path: pathlib.Path,
+    stderr_path: pathlib.Path,
+    timeout_seconds: int,
+    popen_factory=subprocess.Popen,
+    tree_killer=_kill_process_tree_windows,
+) -> dict:
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(profile)
+    env["CODEX_SQLITE_HOME"] = str(profile)
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    timed_out = False
+    termination_reason = "process_exit"
+    with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+        process = popen_factory(
+            codex_argv(exe, workspace),
+            stdin=subprocess.PIPE,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            env=env,
+        )
+        try:
+            process.communicate(input=prompt_bytes, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            termination_reason = "timeout"
+            tree_killer(process)
+            process.communicate()
+    return {
+        "pid": process.pid,
+        "exit_code": process.returncode,
+        "timed_out": timed_out,
+        "termination_reason": termination_reason,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+    }
+
+
+def restrict_profile_acl(
+    profile: pathlib.Path,
+    identity_runner=subprocess.run,
+    icacls_runner=subprocess.run,
+) -> str:
+    if profile.exists() and any(profile.iterdir()):
+        raise RuntimeError("temporary ACL restriction requires an empty profile directory")
+    identity_probe = identity_runner(["whoami.exe"], capture_output=True, text=True, check=False)
+    identity = (identity_probe.stdout or "").strip()
+    if identity_probe.returncode != 0 or not identity:
+        raise RuntimeError("could not resolve current Windows identity")
+    grant = f"{identity}:(OI)(CI)F"
+    applied = icacls_runner(
+        ["icacls.exe", str(profile), "/inheritance:r", "/grant:r", grant],
+        capture_output=True, text=True, check=False,
+    )
+    if applied.returncode != 0:
+        raise RuntimeError("failed to restrict temporary profile ACL")
+    verified = icacls_runner(["icacls.exe", str(profile)], capture_output=True, text=True, check=False)
+    acl_text = (verified.stdout or "") + (verified.stderr or "")
+    if verified.returncode != 0 or identity.casefold() not in acl_text.casefold() or "(I)" in acl_text:
+        raise RuntimeError("temporary profile ACL verification failed")
+    return identity
+
+
+def run_with_profile_cleanup(profile: pathlib.Path, executor):
+    try:
+        return executor()
+    finally:
+        remove_profile(profile)
+
+
+TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def _error_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("message", "error", "detail"):
+            if isinstance(value.get(key), str):
+                return value[key]
+    return json.dumps(value, ensure_ascii=False, sort_keys=True) if value is not None else ""
+
+
+def parse_cli_jsonl(path: pathlib.Path) -> dict:
+    thread_id = None
+    turn_status = "unknown"
+    commands = []
+    mcp_calls = []
+    errors = []
+    final_message = None
+    tokens = {name: None for name in TOKEN_FIELDS}
+    event_count = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw in enumerate(handle, 1):
+            if not raw.strip():
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"malformed CLI JSONL line {line_number}") from exc
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                raise ValueError(f"invalid CLI JSONL event at line {line_number}")
+            event_count += 1
+            kind = event["type"]
+            if kind == "thread.started":
+                thread_id = event.get("thread_id")
+            elif kind == "item.completed":
+                item = event.get("item") or {}
+                if not isinstance(item, dict):
+                    raise ValueError(f"invalid CLI item at line {line_number}")
+                item_kind = item.get("type")
+                if item_kind == "command_execution":
+                    commands.append(dict(item))
+                elif item_kind == "mcp_tool_call":
+                    mcp_calls.append(dict(item))
+                elif item_kind == "agent_message" and isinstance(item.get("text"), str):
+                    final_message = item["text"]
+            elif kind == "turn.completed":
+                turn_status = "completed"
+                usage = event.get("usage") or {}
+                if not isinstance(usage, dict):
+                    raise ValueError(f"invalid CLI usage at line {line_number}")
+                for name in TOKEN_FIELDS:
+                    value = usage.get(name)
+                    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                        raise ValueError(f"invalid CLI token field {name} at line {line_number}")
+                    tokens[name] = value
+            elif kind == "turn.failed":
+                turn_status = "failed"
+                errors.append(_error_text(event.get("error")))
+            elif kind == "error":
+                errors.append(_error_text(event.get("error") or event.get("message") or event))
+    return {
+        "thread_id": thread_id,
+        "turn_status": turn_status,
+        "event_count": event_count,
+        "commands": commands,
+        "mcp_calls": mcp_calls,
+        "native_command_count": len(commands),
+        "mcp_call_count": len(mcp_calls),
+        "reliability_mcp_call_count": sum(call.get("server") == "psr_reliability_native" for call in mcp_calls),
+        "tokens": tokens,
+        "final_message": final_message,
+        "errors": [item for item in errors if item],
+    }
+
+
+def evaluate_manifest_row(manifest_row: dict, workspace: pathlib.Path) -> dict:
+    row = dict(manifest_row)
+    row["workspace"] = str(workspace)
+    rule = row.get("post_condition", {"kind": "none"})
+    kind = rule.get("kind") if isinstance(rule, dict) else None
+    if kind == "workspace_state":
+        return routing_eval.evaluate_workspace_state(row)
+    if kind == "none":
+        return routing_eval.evaluate_post_condition([], row)
+    raise ValueError("CLI automation supports only workspace_state/none post-conditions")
+
+
+def normalized_execution_receipt(
+    manifest_row: dict,
+    process_result: dict,
+    parsed: dict,
+    profile_meta: dict,
+    skill_catalog: list[dict],
+    post_condition: dict,
+    cleanup_ok: bool,
+) -> dict:
+    receipt = {
+        "schema_version": 1,
+        "case_key": manifest_row.get("case_key"),
+        "case_id": manifest_row.get("case_id"),
+        "trial_id": manifest_row.get("trial_id"),
+        "arm": manifest_row.get("arm"),
+        "sequence": manifest_row.get("sequence"),
+        "prompt_sha256": manifest_row.get("prompt_sha256"),
+        "workspace_sha256": manifest_row.get("workspace_sha256"),
+        "fixture_sha256": manifest_row.get("fixture_sha256"),
+        "cli_version": profile_meta.get("cli_version"),
+        "cli_sha256": profile_meta.get("cli_sha256"),
+        "profile_fingerprint": profile_meta.get("profile_fingerprint"),
+        "mcp_sha256": profile_meta.get("mcp_sha256"),
+        "process_exit_code": process_result.get("exit_code"),
+        "timed_out": bool(process_result.get("timed_out")),
+        "termination_reason": process_result.get("termination_reason"),
+        "thread_id": parsed.get("thread_id"),
+        "turn_status": parsed.get("turn_status"),
+        "native_command_count": parsed.get("native_command_count", 0),
+        "mcp_call_count": parsed.get("mcp_call_count", 0),
+        "reliability_mcp_call_count": parsed.get("reliability_mcp_call_count", 0),
+        "skill_catalog": sorted({str(item.get("name", "")).strip() for item in skill_catalog if item.get("name")}),
+        "post_condition_passed": post_condition.get("passed"),
+        "post_condition_source": post_condition.get("source"),
+        "cleanup_ok": bool(cleanup_ok),
+    }
+    for name in TOKEN_FIELDS:
+        receipt[name] = (parsed.get("tokens") or {}).get(name)
+    return receipt
+
+
+def _profile_env(profile: pathlib.Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(profile)
+    env["CODEX_SQLITE_HOME"] = str(profile)
+    return env
+
+
+def probe_skill_catalog(exe: pathlib.Path, profile: pathlib.Path, runner=subprocess.run) -> list[dict]:
+    completed = runner(
+        [exe.as_posix(), "debug", "prompt-input", "probe"],
+        env=_profile_env(profile), capture_output=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("Codex Skill catalog probe failed")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Codex Skill catalog probe returned malformed JSON") from exc
+    return parse_prompt_input_skills(payload)
+
+
+def probe_mcp_catalog(exe: pathlib.Path, profile: pathlib.Path, runner=subprocess.run) -> list[dict]:
+    completed = runner(
+        [exe.as_posix(), "mcp", "list", "--json"],
+        env=_profile_env(profile), capture_output=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("Codex MCP catalog probe failed")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Codex MCP catalog probe returned malformed JSON") from exc
+    if not isinstance(payload, list) or len(payload) != 1:
+        raise ValueError("Codex MCP catalog must contain exactly one server")
+    server = payload[0]
+    if not isinstance(server, dict) or server.get("name") != "psr_reliability_native" or server.get("enabled") is not True:
+        raise ValueError("Codex MCP catalog must contain exactly one enabled psr_reliability_native server")
+    return payload
+
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--arm", choices=("S", "M"), required=True)
+    parser.add_argument("--live-config", type=pathlib.Path, required=True)
+    parser.add_argument("--codex", type=pathlib.Path, required=True)
+    parser.add_argument("--codex-version", required=True)
+    parser.add_argument("--codex-sha256", required=True)
+    parser.add_argument("--skill-path", type=pathlib.Path, required=True)
+    parser.add_argument("--skill-sha256", required=True)
+    parser.add_argument("--mcp-path", type=pathlib.Path, required=True)
+    parser.add_argument("--mcp-sha256", required=True)
+    parser.add_argument("--evidence-root", type=pathlib.Path, required=True)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Isolated Codex routing automation")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    profile = subparsers.add_parser("profile-check")
+    _add_common_args(profile)
+    run_row = subparsers.add_parser("run-row")
+    _add_common_args(run_row)
+    run_row.add_argument("--manifest", type=pathlib.Path, required=True)
+    run_row.add_argument("--sequence", type=int, required=True)
+    run_row.add_argument("--timeout", type=int, required=True)
+    return parser
+
+
+def parse_args(argv=None):
+    return build_arg_parser().parse_args(argv)
+
+
+def _windows_path_key(value: str) -> str:
+    return str(pathlib.PureWindowsPath(value)).replace("/", "\\").rstrip("\\").casefold()
+
+
+def materialize_profile(
+    live_config_path: pathlib.Path,
+    arm: str,
+    skill_path: pathlib.Path,
+    mcp_path: pathlib.Path,
+    codex_path: pathlib.Path,
+    temp_parent: pathlib.Path | None = None,
+    acl_func=restrict_profile_acl,
+    skill_probe=probe_skill_catalog,
+    mcp_probe=probe_mcp_catalog,
+):
+    live_hash_before = sha256_file(live_config_path)
+    live = load_live_config(live_config_path)
+    profile = pathlib.Path(tempfile.mkdtemp(prefix="psr-codex-profile-", dir=str(temp_parent) if temp_parent else None))
+    try:
+        acl_func(profile)
+        initial_text = build_profile_text(live, arm, skill_path.as_posix(), mcp_path.as_posix())
+        config_path = profile / "config.toml"
+        config_path.write_text(initial_text, encoding="utf-8", newline="\n")
+        discovered = skill_probe(codex_path, profile)
+        final_text = build_profile_text(
+            live, arm, skill_path.as_posix(), mcp_path.as_posix(),
+            disabled_skill_paths=[item["path"] for item in discovered],
+        )
+        config_path.write_text(final_text, encoding="utf-8", newline="\n")
+        final_skills = skill_probe(codex_path, profile)
+        verify_arm_catalog(arm, final_skills)
+        profile_dict = tomllib.loads(final_text)
+        verify_mcp_profile(profile_dict)
+        mcp_catalog = mcp_probe(codex_path, profile)
+        observed_command = (((mcp_catalog[0].get("transport") or {}).get("command")) if mcp_catalog else None)
+        if not isinstance(observed_command, str) or _windows_path_key(observed_command) != _windows_path_key(str(mcp_path)):
+            raise ValueError("observed Reliability MCP command does not match frozen MCP path")
+        live_hash_after = sha256_file(live_config_path)
+        if live_hash_after != live_hash_before:
+            raise RuntimeError("live Codex config changed during isolated profile materialization")
+        meta = {
+            "live_config_sha256": live_hash_before,
+            "profile_fingerprint": sha256_file(config_path),
+            "provider": live.get("model_provider"),
+            "model": live.get("model"),
+            "effort": live.get("model_reasoning_effort"),
+        }
+        return profile, meta, final_skills, mcp_catalog
+    except Exception:
+        remove_profile(profile)
+        raise
+
+
+def load_manifest_row(path: pathlib.Path, sequence: int) -> dict:
+    matches = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw in enumerate(handle, 1):
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"malformed manifest JSONL line {line_number}") from exc
+            if isinstance(row, dict) and row.get("sequence") == sequence:
+                matches.append(row)
+    if len(matches) != 1:
+        raise ValueError(f"manifest sequence {sequence} must be unique and present")
+    return matches[0]
+
+
+def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=materialize_profile) -> dict:
+    cli_identity = verify_cli(args.codex, args.codex_version, args.codex_sha256)
+    skill_hash = sha256_file(args.skill_path)
+    mcp_hash = sha256_file(args.mcp_path)
+    if skill_hash.casefold() != args.skill_sha256.casefold():
+        raise ValueError("Skill SHA256 mismatch")
+    if mcp_hash.casefold() != args.mcp_sha256.casefold():
+        raise ValueError("Reliability MCP SHA256 mismatch")
+    profile = None
+    cleanup_ok = False
+    try:
+        profile, meta, skills, mcp_catalog = materialize(
+            args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
+        )
+        result = {
+            "schema_version": 1,
+            "status": "PASS",
+            "arm": args.arm,
+            "cli_version": cli_identity["version"],
+            "cli_sha256": cli_identity["sha256"],
+            "live_config_sha256": meta["live_config_sha256"],
+            "profile_fingerprint": meta["profile_fingerprint"],
+            "mcp_sha256": mcp_hash,
+            "skill_sha256": skill_hash,
+            "skill_catalog": sorted(item["name"] for item in skills),
+            "mcp_catalog": [item["name"] for item in mcp_catalog],
+        }
+    finally:
+        if profile is not None:
+            remove_profile(profile)
+            cleanup_ok = not profile.exists()
+    result["cleanup_ok"] = cleanup_ok
+    args.evidence_root.mkdir(parents=True, exist_ok=True)
+    output = args.evidence_root / f"profile-check-{args.arm}.json"
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return result
+
+
+def execute_run_row(
+    args,
+    verify_cli=verify_cli_identity,
+    materialize=materialize_profile,
+    process_runner=run_codex_process,
+    json_parser=parse_cli_jsonl,
+) -> dict:
+    cli_identity = verify_cli(args.codex, args.codex_version, args.codex_sha256)
+    skill_hash = sha256_file(args.skill_path)
+    mcp_hash = sha256_file(args.mcp_path)
+    if skill_hash.casefold() != args.skill_sha256.casefold():
+        raise ValueError("Skill SHA256 mismatch")
+    if mcp_hash.casefold() != args.mcp_sha256.casefold():
+        raise ValueError("Reliability MCP SHA256 mismatch")
+    row = load_manifest_row(args.manifest, args.sequence)
+    if row.get("arm") != args.arm:
+        raise ValueError("requested arm does not match manifest row")
+    prompt_path = pathlib.Path(row["prompt_path"])
+    prompt_bytes = prompt_path.read_bytes()
+    actual_prompt_hash = hashlib.sha256(prompt_bytes).hexdigest().upper()
+    if actual_prompt_hash != row.get("prompt_sha256"):
+        raise ValueError("prompt hash mismatch")
+    workspace = pathlib.Path(row["workspace"])
+    if routing_eval.workspace_identity(str(workspace)) != row.get("workspace_sha256"):
+        raise ValueError("workspace identity mismatch")
+    output_dir = args.evidence_root / f"{args.sequence:04d}-{row['case_key']}-{args.arm}"
+    if output_dir.exists():
+        raise FileExistsError(f"row evidence already exists: {output_dir}")
+    output_dir.mkdir(parents=True)
+    profile = None
+    cleanup_ok = False
+    try:
+        profile, profile_meta, skills, _ = materialize(
+            args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
+        )
+        process_result = process_runner(
+            args.codex, workspace, profile, prompt_bytes,
+            output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout,
+        )
+        parsed = json_parser(output_dir / "stdout.jsonl")
+        post_condition = evaluate_manifest_row(row, workspace)
+    finally:
+        if profile is not None:
+            remove_profile(profile)
+            cleanup_ok = not profile.exists()
+    if sha256_file(args.live_config) != profile_meta["live_config_sha256"]:
+        raise RuntimeError("live Codex config changed during automated row")
+    profile_meta = dict(profile_meta)
+    profile_meta.update({"cli_version": cli_identity["version"], "cli_sha256": cli_identity["sha256"], "mcp_sha256": mcp_hash})
+    receipt = normalized_execution_receipt(row, process_result, parsed, profile_meta, skills, post_condition, cleanup_ok)
+    (output_dir / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return receipt
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    try:
+        if args.command == "profile-check":
+            result = execute_profile_check(args)
+        elif args.command == "run-row":
+            result = execute_run_row(args)
+        else:
+            raise ValueError(f"unsupported command: {args.command}")
+    except Exception as exc:
+        error = {"status": "ERROR", "error_type": type(exc).__name__, "message": str(exc)}
+        print(json.dumps(error, ensure_ascii=False), file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
