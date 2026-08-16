@@ -49,7 +49,72 @@ def ensure_external_evidence_root(evidence_root: pathlib.Path) -> pathlib.Path:
     raise ValueError("raw automation evidence must stay outside the repository")
 
 
+def _git_rev_parse(ref: str, runner=subprocess.run) -> str:
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    completed = runner(["git", "-C", str(repo_root), "rev-parse", ref], capture_output=True, text=True, check=False)
+    value = (completed.stdout or "").strip()
+    if completed.returncode != 0 or not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+        raise RuntimeError(f"could not resolve repository identity: {ref}")
+    return value.lower()
+
+
+def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skill_sha256: str, mcp_path: pathlib.Path, mcp_sha256: str, profile_meta: dict) -> dict:
+    return {
+        "schema_version": 1,
+        "cli_path": str(pathlib.Path(cli_identity["path"]).resolve(strict=False)),
+        "cli_version": cli_identity["version"],
+        "cli_sha256": cli_identity["sha256"].upper(),
+        "skill_path": str(skill_path.resolve(strict=False)),
+        "skill_sha256": skill_sha256.upper(),
+        "mcp_path": str(mcp_path.resolve(strict=False)),
+        "mcp_sha256": mcp_sha256.upper(),
+        "live_config_sha256": profile_meta["live_config_sha256"].upper(),
+        "model": profile_meta.get("model"),
+        "provider": profile_meta.get("provider"),
+        "provider_base_url": profile_meta.get("provider_base_url"),
+        "provider_wire_api": profile_meta.get("provider_wire_api"),
+        "reasoning_effort": profile_meta.get("effort"),
+        "approval_policy": profile_meta.get("approval_policy"),
+        "sandbox_mode": profile_meta.get("sandbox_mode"),
+        "harness_git_head": _git_rev_parse("HEAD"),
+        "public_main_sha": _git_rev_parse("main"),
+    }
+
+
+def verify_or_create_campaign_identity_lock(lock_path: pathlib.Path, payload: dict, allow_create: bool) -> str:
+    ensure_external_evidence_root(lock_path.parent)
+    lock_path = lock_path.resolve(strict=False)
+    if lock_path.exists():
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ValueError("campaign identity lock is unreadable") from exc
+        if existing != payload:
+            raise ValueError("campaign identity lock does not match current runtime identity")
+    else:
+        if not allow_create:
+            raise ValueError("campaign identity lock is required before row execution")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    return sha256_file(lock_path)
+
+
+def ensure_evidence_outside_workspace(evidence_root: pathlib.Path, workspace: pathlib.Path) -> pathlib.Path:
+    resolved_evidence = evidence_root.resolve(strict=False)
+    resolved_workspace = workspace.resolve(strict=False)
+    if resolved_evidence == resolved_workspace:
+        raise ValueError("evidence root must not equal or descend from the row workspace")
+    try:
+        resolved_evidence.relative_to(resolved_workspace)
+    except ValueError:
+        return resolved_evidence
+    raise ValueError("evidence root must not equal or descend from the row workspace")
+
+
 def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
+    is_junction = getattr(workspace, "is_junction", lambda: False)
+    if workspace.is_symlink() or is_junction():
+        raise ValueError("workspace root must not be a symlink or junction")
     if not workspace.is_dir():
         raise ValueError("workspace must exist before row execution")
     files = {}
@@ -341,69 +406,101 @@ def _error_text(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True) if value is not None else ""
 
 
-def parse_cli_jsonl(path: pathlib.Path) -> dict:
+def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> dict:
     thread_id = None
     turn_status = "unknown"
     commands_by_id = {}
     mcp_calls_by_id = {}
+    command_started_ids = set()
+    command_completed_ids = set()
+    mcp_started_ids = set()
+    mcp_completed_ids = set()
     errors = []
     final_message = None
     tokens = {name: None for name in TOKEN_FIELDS}
     event_count = 0
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, raw in enumerate(handle, 1):
-            if not raw.strip():
-                continue
-            try:
-                event = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"malformed CLI JSONL line {line_number}") from exc
-            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-                raise ValueError(f"invalid CLI JSONL event at line {line_number}")
-            event_count += 1
-            kind = event["type"]
-            if kind == "thread.started":
-                thread_id = event.get("thread_id")
-            elif kind in {"item.started", "item.completed"}:
-                item = event.get("item") or {}
-                if not isinstance(item, dict):
-                    raise ValueError(f"invalid CLI item at line {line_number}")
-                item_kind = item.get("type")
-                item_id = item.get("id")
-                if item_kind in {"command_execution", "mcp_tool_call"}:
-                    if not isinstance(item_id, str) or not item_id:
-                        raise ValueError(f"CLI tool/command item missing id at line {line_number}")
-                    target = commands_by_id if item_kind == "command_execution" else mcp_calls_by_id
-                    target[item_id] = dict(item)
-                elif kind == "item.completed" and item_kind == "agent_message" and isinstance(item.get("text"), str):
-                    final_message = item["text"]
-            elif kind == "turn.completed":
-                turn_status = "completed"
-                usage = event.get("usage") or {}
-                if not isinstance(usage, dict):
-                    raise ValueError(f"invalid CLI usage at line {line_number}")
-                for name in TOKEN_FIELDS:
-                    value = usage.get(name)
-                    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
-                        raise ValueError(f"invalid CLI token field {name} at line {line_number}")
-                    tokens[name] = value
-            elif kind == "turn.failed":
-                turn_status = "failed"
-                errors.append(_error_text(event.get("error")))
-            elif kind == "error":
-                errors.append(_error_text(event.get("error") or event.get("message") or event))
+    truncated_jsonl_tail = False
+    lines = path.read_text(encoding="utf-8").splitlines()
+    nonempty_indexes = [index for index, raw in enumerate(lines) if raw.strip()]
+    last_nonempty_index = nonempty_indexes[-1] if nonempty_indexes else None
+
+    for zero_index, raw in enumerate(lines):
+        line_number = zero_index + 1
+        if not raw.strip():
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            if allow_truncated_tail and zero_index == last_nonempty_index:
+                truncated_jsonl_tail = True
+                break
+            raise ValueError(f"malformed CLI JSONL line {line_number}") from exc
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            raise ValueError(f"invalid CLI JSONL event at line {line_number}")
+        event_count += 1
+        kind = event["type"]
+        if kind == "thread.started":
+            thread_id = event.get("thread_id")
+        elif kind in {"item.started", "item.completed"}:
+            item = event.get("item") or {}
+            if not isinstance(item, dict):
+                raise ValueError(f"invalid CLI item at line {line_number}")
+            item_kind = item.get("type")
+            item_id = item.get("id")
+            if item_kind in {"command_execution", "mcp_tool_call"}:
+                if not isinstance(item_id, str) or not item_id:
+                    raise ValueError(f"CLI tool/command item missing id at line {line_number}")
+                target = commands_by_id if item_kind == "command_execution" else mcp_calls_by_id
+                started_ids = command_started_ids if item_kind == "command_execution" else mcp_started_ids
+                completed_ids = command_completed_ids if item_kind == "command_execution" else mcp_completed_ids
+                summary = target.setdefault(item_id, {"id": item_id, "type": item_kind, "started_event_index": None, "completed_event_index": None})
+                if item_kind == "command_execution":
+                    for field in ("exit_code",):
+                        if field in item:
+                            summary[field] = item[field]
+                else:
+                    for field in ("server", "tool"):
+                        if field in item:
+                            summary[field] = item[field]
+                if kind == "item.started":
+                    started_ids.add(item_id)
+                    if summary["started_event_index"] is None:
+                        summary["started_event_index"] = event_count
+                else:
+                    completed_ids.add(item_id)
+                    summary["completed_event_index"] = event_count
+                    summary["terminal_status"] = item.get("status")
+            elif kind == "item.completed" and item_kind == "agent_message" and isinstance(item.get("text"), str):
+                final_message = item["text"]
+        elif kind == "turn.completed":
+            turn_status = "completed"
+            usage = event.get("usage") or {}
+            if not isinstance(usage, dict):
+                raise ValueError(f"invalid CLI usage at line {line_number}")
+            for name in TOKEN_FIELDS:
+                value = usage.get(name)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                    raise ValueError(f"invalid CLI token field {name} at line {line_number}")
+                tokens[name] = value
+        elif kind == "turn.failed":
+            turn_status = "failed"
+            errors.append(_error_text(event.get("error")))
+        elif kind == "error":
+            errors.append(_error_text(event.get("error") or event.get("message") or event))
+
     commands = list(commands_by_id.values())
     mcp_calls = list(mcp_calls_by_id.values())
     return {
         "thread_id": thread_id,
         "turn_status": turn_status,
         "event_count": event_count,
+        "truncated_jsonl_tail": truncated_jsonl_tail,
         "commands": commands,
         "mcp_calls": mcp_calls,
         "native_command_count": len(commands),
-        "incomplete_native_command_count": sum(call.get("status") != "completed" for call in commands),
+        "incomplete_native_command_count": len(command_started_ids - command_completed_ids),
         "mcp_call_count": len(mcp_calls),
-        "incomplete_mcp_call_count": sum(call.get("status") != "completed" for call in mcp_calls),
+        "incomplete_mcp_call_count": len(mcp_started_ids - mcp_completed_ids),
         "reliability_mcp_call_count": sum(call.get("server") == "psr_reliability_native" for call in mcp_calls),
         "tokens": tokens,
         "final_message": final_message,
@@ -453,6 +550,16 @@ def normalized_execution_receipt(
         "cli_sha256": profile_meta.get("cli_sha256"),
         "profile_fingerprint": profile_meta.get("profile_fingerprint"),
         "mcp_sha256": profile_meta.get("mcp_sha256"),
+        "skill_sha256": profile_meta.get("skill_sha256"),
+        "live_config_sha256": profile_meta.get("live_config_sha256"),
+        "model": profile_meta.get("model"),
+        "provider": profile_meta.get("provider"),
+        "reasoning_effort": profile_meta.get("effort"),
+        "approval_policy": profile_meta.get("approval_policy"),
+        "sandbox_mode": profile_meta.get("sandbox_mode"),
+        "campaign_identity_sha256": profile_meta.get("campaign_identity_sha256"),
+        "harness_git_head": profile_meta.get("harness_git_head"),
+        "public_main_sha": profile_meta.get("public_main_sha"),
         "process_exit_code": process_result.get("exit_code"),
         "timed_out": bool(process_result.get("timed_out")),
         "termination_reason": process_result.get("termination_reason"),
@@ -464,6 +571,9 @@ def normalized_execution_receipt(
         "mcp_call_count": parsed.get("mcp_call_count", 0),
         "incomplete_mcp_call_count": parsed.get("incomplete_mcp_call_count", 0),
         "reliability_mcp_call_count": parsed.get("reliability_mcp_call_count", 0),
+        "truncated_jsonl_tail": bool(parsed.get("truncated_jsonl_tail")),
+        "native_commands": parsed.get("commands", []),
+        "mcp_calls": parsed.get("mcp_calls", []),
         "skill_catalog": sorted({str(item.get("name", "")).strip() for item in skill_catalog if item.get("name")}),
         "post_condition_passed": post_condition.get("passed"),
         "post_condition_source": post_condition.get("source"),
@@ -525,6 +635,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mcp-path", type=pathlib.Path, required=True)
     parser.add_argument("--mcp-sha256", required=True)
     parser.add_argument("--evidence-root", type=pathlib.Path, required=True)
+    parser.add_argument("--identity-lock", type=pathlib.Path, required=True)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -584,12 +695,18 @@ def materialize_profile(
         live_hash_after = sha256_file(live_config_path)
         if live_hash_after != live_hash_before:
             raise RuntimeError("live Codex config changed during isolated profile materialization")
+        provider_name = live.get("model_provider")
+        provider = (live.get("model_providers") or {}).get(provider_name) or {}
         meta = {
             "live_config_sha256": live_hash_before,
             "profile_fingerprint": sha256_file(config_path),
-            "provider": live.get("model_provider"),
+            "provider": provider_name,
+            "provider_base_url": provider.get("base_url"),
+            "provider_wire_api": provider.get("wire_api"),
             "model": live.get("model"),
             "effort": live.get("model_reasoning_effort"),
+            "approval_policy": live.get("approval_policy"),
+            "sandbox_mode": live.get("sandbox_mode"),
         }
         return profile, meta, final_skills, mcp_catalog
     except Exception:
@@ -597,14 +714,30 @@ def materialize_profile(
         raise
 
 
+_CASE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_WINDOWS_RESERVED_BASENAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def validate_case_key(case_key: str) -> str:
+    if not isinstance(case_key, str) or not _CASE_KEY_RE.fullmatch(case_key) or case_key.endswith((".", " ")):
+        raise ValueError("manifest case_key must be a single safe Windows path component")
+    basename = case_key.split(".", 1)[0].upper()
+    if basename in _WINDOWS_RESERVED_BASENAMES:
+        raise ValueError("manifest case_key uses a reserved Windows device name")
+    return case_key
+
+
 def validate_manifest_row_paths(manifest_path: pathlib.Path, row: dict) -> None:
     campaign_root = ensure_external_evidence_root(manifest_path.parent)
     case_key = row.get("case_key")
     arm = row.get("arm")
-    if not isinstance(case_key, str) or not case_key or arm not in {"S", "M"}:
+    if arm not in {"S", "M"}:
         raise ValueError("manifest row must contain a valid case_key and arm")
-    if case_key in {".", ".."} or pathlib.PureWindowsPath(case_key).name != case_key:
-        raise ValueError("manifest case_key must be a single safe path component")
+    validate_case_key(case_key)
     expected_prompt = (campaign_root / "prompts" / f"{case_key}.txt").resolve(strict=False)
     expected_workspace = (campaign_root / "workspaces" / arm / case_key).resolve(strict=False)
     for expected in (expected_prompt, expected_workspace):
@@ -652,6 +785,8 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
         profile, meta, skills, mcp_catalog = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
+        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, meta)
+        identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=True)
         result = {
             "schema_version": 1,
             "status": "PASS",
@@ -662,6 +797,9 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
             "profile_fingerprint": meta["profile_fingerprint"],
             "mcp_sha256": mcp_hash,
             "skill_sha256": skill_hash,
+            "campaign_identity_sha256": identity_sha,
+            "harness_git_head": identity["harness_git_head"],
+            "public_main_sha": identity["public_main_sha"],
             "skill_catalog": sorted(item["name"] for item in skills),
             "mcp_catalog": [item["name"] for item in mcp_catalog],
         }
@@ -706,21 +844,24 @@ def execute_run_row(
     actual_fixture_hash = workspace_fixture_sha256(workspace)
     if actual_fixture_hash != row.get("fixture_sha256"):
         raise ValueError("workspace fixture SHA256 mismatch")
+    ensure_evidence_outside_workspace(args.evidence_root, workspace)
     output_dir = args.evidence_root / f"{args.sequence:04d}-{row['case_key']}-{args.arm}"
     if output_dir.exists():
         raise FileExistsError(f"row evidence already exists: {output_dir}")
-    output_dir.mkdir(parents=True)
     profile = None
     cleanup_ok = False
     try:
         profile, profile_meta, skills, _ = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
+        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, profile_meta)
+        identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=False)
+        output_dir.mkdir(parents=True)
         process_result = process_runner(
             args.codex, workspace, profile, prompt_bytes,
             output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout,
         )
-        parsed = json_parser(output_dir / "stdout.jsonl")
+        parsed = json_parser(output_dir / "stdout.jsonl", allow_truncated_tail=bool(process_result.get("timed_out")))
         validate_cli_terminal_state(process_result, parsed)
         post_condition = evaluate_manifest_row(row, workspace)
     finally:
@@ -730,7 +871,15 @@ def execute_run_row(
     if sha256_file(args.live_config) != profile_meta["live_config_sha256"]:
         raise RuntimeError("live Codex config changed during automated row")
     profile_meta = dict(profile_meta)
-    profile_meta.update({"cli_version": cli_identity["version"], "cli_sha256": cli_identity["sha256"], "mcp_sha256": mcp_hash})
+    profile_meta.update({
+        "cli_version": cli_identity["version"],
+        "cli_sha256": cli_identity["sha256"],
+        "mcp_sha256": mcp_hash,
+        "skill_sha256": skill_hash,
+        "campaign_identity_sha256": identity_sha,
+        "harness_git_head": identity["harness_git_head"],
+        "public_main_sha": identity["public_main_sha"],
+    })
     receipt = normalized_execution_receipt(row, process_result, parsed, profile_meta, skills, post_condition, cleanup_ok)
     (output_dir / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return receipt

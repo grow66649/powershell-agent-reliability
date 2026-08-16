@@ -59,7 +59,7 @@ The provider table may contain credentials or credential-bearing headers. Those 
 
 The secret-bearing base template and per-row profile directories must inherit or receive an ACL restricted to the current Windows user. Cleanup of the secret-bearing profile is an explicit post-condition. A cleanup failure blocks the campaign until the leftover profile is removed safely; the runner must not weaken ACLs to force cleanup.
 
-A redacted profile manifest is preserved separately. It records non-secret runtime identity, source config hash, generated profile hash/fingerprint, Skill surface, MCP executable hash, and cleanup result.
+A redacted profile manifest is preserved separately. It records non-secret runtime identity, source config hash, generated profile hash/fingerprint, Skill surface, MCP executable hash, and cleanup result. Before formal rows, `profile-check` creates or verifies one shared non-secret campaign identity lock binding the actual bundled CLI path/version/hash, Skill/MCP hashes, live-config hash, effective model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and local public-main anchor. Every S/M row must match the same lock; provider credentials/headers are never stored in it.
 
 ## Skill isolation
 
@@ -82,7 +82,7 @@ Do not copy OAuth state for unrelated connectors. Do not start or authenticate u
 
 ## Per-row execution
 
-Each manifest row must resolve to the prepared external campaign layout (`prompts/<case-key>.txt` and `workspaces/<arm>/<case-key>` under the manifest directory); `case-key` must be one safe path component, and traversal/arbitrary prompt/workspace paths are rejected. Each admitted row receives:
+Each manifest row must resolve to the prepared external campaign layout (`prompts/<case-key>.txt` and `workspaces/<arm>/<case-key>` under the manifest directory); `case-key` must be one bounded ASCII Windows-safe component, rejecting reserved device names, reserved characters, control characters, trailing dot/space, and traversal/arbitrary prompt/workspace paths. Each admitted row receives:
 
 1. a fresh disposable workspace materialized from its frozen fixture, with the actual pre-run UTF-8 text tree re-hashed against the manifest fixture identity before any profile/model call;
 2. a fresh disposable `CODEX_HOME` cloned from the campaign base template;
@@ -100,9 +100,9 @@ The existing 360-second campaign timeout remains the external kill boundary for 
 
 ## Evidence and cleanup
 
-Raw CLI stdout JSONL, bounded stderr, final deterministic fixture state, and normalized routing records stay under a host-local evidence root outside the repository; the runner rejects repo-internal evidence roots. Secret-bearing `CODEX_HOME` contents are not evidence artifacts.
+Raw CLI stdout JSONL, stderr, final deterministic fixture state, and normalized routing records stay under a host-local evidence root outside the repository; the runner rejects repo-internal evidence roots and any evidence root equal to or below the row workspace so runner output cannot mutate a fixture after its pre-model hash check. Secret-bearing `CODEX_HOME` contents are not evidence artifacts.
 
-The normalized execution receipt records at least: case/trial/arm, sequence, public-main anchor, CLI version/hash, redacted profile fingerprint, MCP hash, prompt hash, workspace/fixture identity, process exit/timeout state, task wall-clock, post-condition truth, tool/Skill observations exposed by the rollout, token fields when present, and cleanup result.
+The normalized execution receipt records at least: case/trial/arm, sequence, campaign-identity-lock hash, public-main and harness-Git anchors, CLI version/hash, redacted profile fingerprint, live-config/model/provider/reasoning/approval/sandbox identity, Skill/MCP hashes, prompt hash, workspace/fixture identity, process exit/timeout state, task wall-clock, ordered command/MCP attempt summaries with started/completed/terminal outcome evidence, post-condition truth, tool/Skill observations exposed by the rollout, token fields when present, and cleanup result.
 
 A command exit of zero does not imply task success. The deterministic post-condition remains authoritative. Conversely, an agent/task failure under a valid protocol remains a scored negative rather than an invalid row.
 
@@ -113,9 +113,9 @@ Parity is established in layers before CLI automation can replace manual train e
 
 1. **Runtime identity:** bundled CLI version/hash, model, provider, reasoning effort, approval policy, sandbox policy, prompt bytes, workspace fixture, and Reliability MCP executable/hash match the frozen campaign identity.
 2. **Surface identity:** S exposes the Reliability Skill and M does not; both expose the same Reliability MCP tools; no unexpected MCP/plugin surface is present in the isolated profile.
-3. **Capability sessions:** separate, non-scored Desktop and CLI sessions may explicitly ask whether `powershell-reliability` is available/readable and may perform an explicit Reliability MCP canary. These sessions are deliberately separate from natural-task trials and cannot be reused as scored threads.
-4. **Behavioral canaries:** for each arm, at least one train-visible should-trigger case and one no-trigger/known-good case are run independently in Desktop and CLI with the same prompt and fixture. Deterministic post-condition truth and the relevant routing behavior must agree. A mismatch is investigated rather than averaged away.
-5. **Evidence compatibility:** automated JSONL contains enough bounded facts for the existing collector/scorer or an explicitly reviewed adapter to produce the same trial semantics as Desktop rollout evidence. Started command/MCP attempts must not disappear merely because the row is interrupted; completed events update the same item identity, and non-timeout output must contain a terminal turn event.
+3. **Capability sessions:** run exactly four fresh non-scored capability sessions: Desktop-S, Desktop-M, CLI-S, and CLI-M. They may explicitly ask whether `powershell-reliability` is available/readable and may perform an explicit Reliability MCP canary. Self-report alone is insufficient; these sessions are separate from natural-task trials and cannot be reused as scored threads.
+4. **Behavioral canaries:** run four train-visible natural cases (`TC-A`, `TT-A`, `NG-B`, `NW-A`) across Desktop-S/M and CLI-S/M for 16 fresh natural sessions with byte-equivalent prompts/fixtures. Natural prompts do not name the Skill, MCP, arm, evaluator, or expected activation. Deterministic post-condition truth plus command-failure-boundary, MCP-order, false-activation, and safety direction must satisfy the reviewed parity rule. A valid mismatch may repeat the entire four-cell case bundle once; persistent runtime-specific divergence fails parity and unstable evidence remains inconclusive.
+5. **Evidence compatibility:** automated JSONL contains enough bounded facts for the existing collector/scorer or an explicitly reviewed adapter to produce the same trial semantics as Desktop rollout evidence. `item.started` establishes an attempt, `item.completed` records terminal outcome (including failed/declined completion), and started-only attempts remain visible. A timed-out row may preserve a valid prefix when only the final non-empty JSONL record is truncated; non-timeout or mid-stream corruption fails closed, and non-timeout output must contain a terminal turn event.
 
 Until all applicable parity layers pass, CLI runs are screening/engineering evidence only. Even after parity, final product admission retains a bounded fresh Desktop confirmation sample.
 
@@ -188,15 +188,19 @@ Implementation begins with RED tests for:
 - producing exactly one Reliability MCP in the generated profile;
 - S catalog conformance and M catalog conformance from `debug prompt-input` output;
 - prompt delivery through stdin without byte drift;
+- one shared campaign identity lock across S/M rows, with runtime drift rejected before model execution;
 - one fresh `CODEX_HOME`/workspace/output namespace per row;
+- strict Windows-safe `case-key` validation and evidence-root/workspace separation;
+- started/completed command/MCP identity pairing, failed/declined terminal outcomes, and timeout final-line truncation handling;
 - timeout versus process failure versus valid task failure classification;
 - deterministic post-condition truth remaining independent from process exit/final prose;
-- cleanup success and fail-closed handling of leftover secret-bearing profiles.
+- cleanup success and fail-closed handling of leftover secret-bearing profiles;
+- the normal Windows verifier actually executing and compiling the automation runner/test module.
 
-The slice is accepted only when focused automation tests pass, existing routing scorer tests remain green, repo-wide verification passes, `git diff --check` is clean, and a non-scored local parity smoke proves both S and M profile construction without mutating live config.
+The slice is accepted only when focused automation tests pass, existing routing scorer tests remain green, repo-wide verification passes, `git diff --check` is clean, exact-head Windows CI runs the automation suite, and a fresh independent implementation review accepts the exact head. Model-bearing parity starts only after that merge/verification gate.
 
-Model-bearing parity canaries may run after the runner tests pass. The automated Skill-necessity screen and any scored train rows remain blocked until those parity canaries pass.
+Model-bearing parity canaries may run only after the automation PR is accepted, merged, and the merged public main is reverified. The automated Skill-necessity screen and any scored train rows remain blocked until parity passes.
 
 ## Owner decision already fixed
 
-The owner selected design A: disposable isolated profiles. No further choice between A/B/C is required. The remaining owner gate is review of this written spec before implementation planning, per the repository's design-first workflow.
+The owner selected design A: disposable isolated profiles. No further choice between A/B/C is required. Implementation remains in Draft PR #1 until the current review blockers close, exact-head Windows CI covers the automation suite, and a fresh independent rereview accepts the head.
