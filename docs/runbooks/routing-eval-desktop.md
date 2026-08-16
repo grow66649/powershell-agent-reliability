@@ -33,25 +33,25 @@ Verify both facts from the fresh M thread before any scored turn. If supported r
 
 Do not hide catalog evidence after collection, rename the arm, weaken unrelated global configuration, or infer MCP-only behavior from S rows.
 
-## 4. Freeze the reviewed dataset
+## 4. Use the reviewed train-visible and sealed datasets
 
-The future controlled core path is `benchmarks/routing_eval/core_cases.json`. That file is created and frozen only by the separate owner-reviewed dataset/campaign plan after this harness review.
+The checked-in train-visible package is `benchmarks/routing_eval/train_cases.json` with its review metadata in `benchmarks/routing_eval/train_review.jsonl`. The timeout-calibration cases are in `benchmarks/routing_eval/calibration_cases.json`.
 
-Do not author or tune the 24-case core in this implementation slice. The later plan freezes train and validation before execution and creates the unseen holdout only after train-driven routing changes are frozen.
+The sealed validation package is intentionally host-local and is not checked into this repository. There is no current `benchmarks/routing_eval/core_cases.json`; do not create or require that path for the current campaign. The unseen holdout is created only after train-driven routing changes are frozen, as required by the r4 contract.
 
-Prepare a campaign only from the reviewed frozen cases:
+Prepare scored train rows from the reviewed train-visible cases:
 
 ```powershell
 python .\benchmarks\harness\routing_eval.py prepare `
-  --cases .\benchmarks\routing_eval\core_cases.json `
-  --output-root <host-local-evidence-root> `
+  --cases .\benchmarks\routing_eval\train_cases.json `
+  --output-root <host-local-train-evidence-root> `
   --trials 3 --seed <frozen-seed>
 ```
 
-Record the generated manifest hash before running scored turns. New core artifact cases freeze an evaluator-owned `workspace_state` rule before execution. Those rules use only the five bounded file-state checks defined by the contract and relative paths under the exact trial workspace; do not derive or revise completion criteria from later model output.
+Record the generated manifest hash before running scored turns. New artifact cases freeze an evaluator-owned `workspace_state` rule before execution. Those rules use only the five bounded file-state checks defined by the contract and relative paths under the exact trial workspace; do not derive or revise completion criteria from later model output.
 ## 4A. Review and seal the train/validation package
 
-Before any scored execution, the owner reviews every core case row: natural-task rationale, provenance cluster, expected routing, fixture, boundary detector, deterministic post-condition, leakage checks, and safety/privacy checks. Only rows approved before S/M outcome visibility are eligible.
+Before any scored execution, the owner reviews every scored train/validation case row: natural-task rationale, provenance cluster, expected routing, fixture, boundary detector, deterministic post-condition, leakage checks, and safety/privacy checks. Only rows approved before S/M outcome visibility are eligible.
 
 Keep the 14 train cases/reviews in the train-visible repository surface. Keep the 10 validation prompts, fixtures, provenance metadata, and reviews host-local and sealed by hash from any session allowed to modify routing after train evidence. Validation remains sealed until the candidate routing revision is frozen. Validation outcomes cannot tune that same revision.
 
