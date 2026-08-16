@@ -1,5 +1,7 @@
 # PowerShell Reliability MCP Tool Contract v0.1
 
+> **Historical / superseded.** This file records the v0.1 tool contract for development history. For current agent-facing behavior, use [mcp-tool-contract-v0.2.md](mcp-tool-contract-v0.2.md). Keeping this file does not create a new compatibility or support guarantee for v0.1.
+
 This contract defines the bounded structured surface of the local STDIO server. Codex Desktop/app-server remains the command/process/sandbox owner.
 
 ## Common invariants
