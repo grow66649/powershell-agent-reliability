@@ -1036,7 +1036,7 @@ def execute_run_row(
                 profile_cleanup_ok = not profile.exists()
             except Exception as exc:
                 cleanup_errors.append(("profile", exc))
-        if workspace_materialized or workspace.exists():
+        if workspace_materialized:
             try:
                 remove_runtime_workspace(workspace)
                 workspace_cleanup_ok = not workspace.exists()

@@ -69,6 +69,17 @@ class RoutingEvalPrepareTests(unittest.TestCase):
             }
             self.assertTrue(required.issubset(by_arm["S"]))
 
+    def test_prepare_campaign_rejects_runtime_parent_inside_coordinator(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            with self.assertRaisesRegex(ValueError, "disjoint"):
+                routing_eval.prepare_campaign(
+                    [_case()], coordinator, trials=1, seed=7,
+                    runtime_parent=coordinator / "runtime",
+                    token_factory=lambda: "a" * 32,
+                )
+
     def test_prepare_campaign_rejects_reused_opaque_row_token(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)

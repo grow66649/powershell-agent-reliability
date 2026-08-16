@@ -743,6 +743,25 @@ class RunRowWorkflowTests(unittest.TestCase):
             expected = codex_automation.routing_eval._fixture_sha256({"helper.cmd": content})
             self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), expected)
 
+    def test_execute_run_row_rejects_preexisting_target_workspace_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root)
+            workspace = pathlib.Path(row["workspace"])
+            workspace.mkdir()
+            marker = workspace / "unexpected.txt"
+            marker.write_text("preserve", encoding="utf-8")
+            process = mock.Mock()
+            with self.assertRaisesRegex(RuntimeError, "runtime root.*empty"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process,
+                )
+            materialize.assert_not_called()
+            process.assert_not_called()
+            self.assertTrue(marker.is_file())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
     def test_execute_run_row_rejects_mutated_fixture_before_profile_or_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -961,7 +980,7 @@ class OperatorArtifactTests(unittest.TestCase):
         self.assertIn("ValueFromRemainingArguments", launcher_text)
         self.assertNotIn("Invoke-Expression", launcher_text)
         runbook_text = runbook.read_text(encoding="utf-8")
-        for phrase in ("profile-check", "run-row", "screening", "Windows Codex Desktop", "concurrency is 1"):
+        for phrase in ("profile-check", "run-row", "screening", "Windows Codex Desktop", "concurrency is 1", "--runtime-parent", "opaque", "leakage canary"):
             self.assertIn(phrase, runbook_text)
 
     def test_verify_local_runs_and_compiles_automation_tests(self):

@@ -45,10 +45,11 @@ Prepare scored train rows from the reviewed train-visible cases:
 python .\benchmarks\harness\routing_eval.py prepare `
   --cases .\benchmarks\routing_eval\train_cases.json `
   --output-root <host-local-train-evidence-root> `
+  --runtime-parent <neutral-runtime-parent> `
   --trials 3 --seed <frozen-seed>
 ```
 
-Record the generated manifest hash before running scored turns. New artifact cases freeze an evaluator-owned `workspace_state` rule before execution. Those rules use only the five bounded file-state checks defined by the contract and relative paths under the exact trial workspace; do not derive or revise completion criteria from later model output.
+Record the generated manifest hash before running scored turns. Preparation creates one empty opaque campaign runtime root under the separate neutral runtime parent and creates **no row workspace**. The manifest freezes one opaque row path per S/M row plus coordinator-local prompt/fixture payloads. New artifact cases freeze an evaluator-owned `workspace_state` rule before execution. Those rules use only the five bounded file-state checks defined by the contract and relative paths under the exact trial workspace; do not derive or revise completion criteria from later model output.
 ## 4A. Review and seal the train/validation package
 
 Before any scored execution, the owner reviews every scored train/validation case row: natural-task rationale, provenance cluster, expected routing, fixture, boundary detector, deterministic post-condition, leakage checks, and safety/privacy checks. Only rows approved before S/M outcome visibility are eligible.
@@ -73,6 +74,7 @@ Prepare the reviewed calibration set with two repeats per case:
 python .\benchmarks\harness\routing_eval.py prepare `
   --cases .\benchmarks\routing_eval\calibration_cases.json `
   --output-root <host-local-calibration-root> `
+  --runtime-parent <neutral-runtime-parent> `
   --trials 2 --seed 20260814
 ```
 
@@ -96,30 +98,50 @@ Only after the candidate routing revision is frozen may the sealed validation pa
 
 ## 5. Execute manifest rows in normal Desktop
 
-For every manifest row:
+For every manifest row, keep the runtime root single-row and opaque:
 
 1. Apply the declared S or M setup and re-check its catalog invariant.
-2. Start a fresh Codex Desktop thread; do not reuse conversational state.
-3. Use exactly the manifest workspace. Never reuse the paired arm's mutated workspace.
-4. Submit the generated prompt file unchanged. Do not add arm names, Skill hints, MCP hints, expected failures, or evaluator instructions.
-5. Allow Codex Desktop/app-server to own normal command/process execution.
-6. Preserve the resulting rollout JSONL under the host-local evidence root.
+2. Verify the manifest runtime root is empty. Materialize **only** the current row from its frozen `fixture_path` using the reviewed harness helper; do not create any peer/future workspace.
+3. Start a fresh Codex Desktop thread; do not reuse conversational state.
+4. Open exactly the manifest workspace. Its model-visible path must contain only the neutral runtime parent, opaque campaign token, and opaque row token; it must not encode S/M, case/lane, Skill/MCP identity, evaluator labels, or campaign purpose.
+5. Submit the generated prompt file unchanged. Do not add arm names, Skill hints, MCP hints, expected failures, or evaluator instructions.
+6. Allow Codex Desktop/app-server to own normal command/process execution.
+7. Preserve the resulting rollout JSONL under host-local evidence, grade/collect the current row while its workspace still exists, then delete that row workspace and verify the runtime root is empty before starting the next row.
+
+From the repository root, materialize exactly one row with the reviewed helper:
+
+```powershell
+python -c "import pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); codex_automation.validate_manifest_row_paths(m,r); print(codex_automation.materialize_row_workspace(r))"
+```
+
+Do this immediately before the Desktop row. Do not use this helper to pre-create a batch.
 
 Raw rollout evidence stays host-local. Do not copy full transcripts, credentials, full PATH/environment, or unrelated machine state into the repository.
 
-## 6. Collect after each bounded batch
+## 6. Grade and collect each row before workspace cleanup
 
-Run collection against the actual Desktop sessions root:
+`workspace_state` is evaluator-owned final state, so collection must occur while the active row workspace still exists. Do not defer grading until after several row workspaces have been deleted.
+
+For the just-completed Desktop thread, copy only that row's rollout JSONL into a host-local per-row collection directory and collect against the full frozen manifest:
 
 ```powershell
 python .\benchmarks\harness\routing_eval.py collect `
-  --manifest <host-local-evidence-root>\manifest.jsonl `
-  --sessions-root <codex-desktop-sessions-root> `
-  --output <host-local-evidence-root>\records.jsonl `
-  --report <host-local-evidence-root>\collect-report.json
+  --manifest <campaign-root>\manifest.jsonl `
+  --sessions-root <host-local-current-row-session-dir> `
+  --output <host-local-current-row-record.jsonl> `
+  --report <host-local-current-row-collect-report.json>
 ```
 
-Review expected, collected, invalid, and remaining counts plus the next prompt/workspace pointers. Collection binds the rollout to its exact manifest workspace first, then reads final workspace state directly for `workspace_state` grading. It does not run a verifier command and does not ask the agent to self-report pass/fail. Wrong workspace, duplicate identity, prompt drift, or arm-catalog mismatch is not repaired in place; preserve evidence and stop the affected batch.
+The per-row report must contain exactly the intended row and no invalid record before cleanup. Collection binds the rollout to its exact opaque workspace first and evaluates the deterministic post-condition directly from that workspace; it does not run a verifier command and does not ask the agent to self-report pass/fail.
+
+After the current row record is preserved, remove the row workspace and verify the runtime root is empty:
+
+```powershell
+python -c "import pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); w=pathlib.Path(r['workspace']); codex_automation.remove_runtime_workspace(w); assert not w.exists(); assert list(pathlib.Path(r['runtime_root']).iterdir()) == []"
+```
+
+Wrong workspace, duplicate identity, prompt drift, arm-catalog mismatch, coordinator/other-row contamination, stale runtime entries, or failed cleanup is protocol failure. Preserve evidence and stop the affected batch; do not repair the row in place. At campaign completion or abort, remove the now-empty opaque runtime root and verify it is gone while retaining coordinator/raw evidence.
+
 ## 7. Stop on hard guardrails
 
 Stop the affected frozen revision immediately if a valid trial shows any pre-boundary Reliability MCP use, a Reliability-caused wrong repair, or a Reliability-caused false completion. Preserve the evidence; do not patch validation/holdout behavior and continue under the same identity.

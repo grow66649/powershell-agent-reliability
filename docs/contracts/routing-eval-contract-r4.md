@@ -14,7 +14,7 @@ Codex Desktop/app-server remains the normal command, process, sandbox, and appro
 
 ## Arm invariants
 
-Matched S/M trials keep the same Desktop build, model, reasoning effort, approval policy, sandbox type, Reliability MCP candidate/tool schemas, fixture definition, prompt text, and measurement policy. The only declared routing difference is companion-Skill exposure.
+Matched S/M trials keep the same Desktop build, model, reasoning effort, approval policy, sandbox type, Reliability MCP candidate/tool schemas, fixture definition, prompt text, measurement policy, timeout, and opaque runtime-path format. The only declared routing difference is companion-Skill exposure.
 
 Before performance scoring, matched `(case_id, trial_id)` rows must agree on `prompt_sha256`, `fixture_sha256`, model, effort, approval policy, sandbox type, Desktop/CLI runtime identity, and originator. Missing identity evidence or pair identity drift invalidates both arms for that pair; neither row may enter recall, false-activation, or paired-token denominators.
 
@@ -27,7 +27,19 @@ If supported reversible Skill exclusion cannot establish M while leaving the sam
 One normalized trial is keyed by `(case_id, trial_id, arm)`. One matched pair is keyed by `(case_id, trial_id)` and contains one S row plus one M row.
 The prompt is arm-neutral and contains only the neutral `[CASE-ID: ...]` marker plus task content. It must not name the Skill, Reliability MCP, routing arm, evaluator, or expected activation. `{workspace}` is forbidden because absolute per-arm paths would destroy prompt matching.
 
-Each arm gets a fresh disposable workspace materialized from the same fixture definition. `fixture_sha256` must match across the pair; `workspace_sha256` must differ. Prompt and fixture hashes are deterministic identities, not substitutes for raw evidence.
+Each arm gets a fresh disposable workspace from the same frozen fixture definition. `fixture_sha256` must match across the pair; `workspace_sha256` must differ. Prompt and fixture hashes are deterministic identities, not substitutes for raw evidence.
+
+## Row isolation and arm blinding
+
+Campaign preparation stores prompts, fixture payloads, manifest state, and later evidence under a host-local coordinator root outside the repository. It creates one empty runtime root under a separate neutral runtime parent and freezes one unique 128-bit campaign token plus one unique 128-bit row token per manifest row. Tokens are rendered as exactly 32 lowercase hexadecimal characters and are not derived from arm, case, lane, Skill/MCP identity, campaign purpose, or expected outcome.
+
+The coordinator root and runtime root must be disjoint in both directions. A manifest workspace is the direct child `<runtime-root>/<opaque-row-token>`; its path format is identical across S and M. Campaign preparation does not create any row workspace. During execution the runtime root must be empty before materialization, and exactly one active row workspace may exist while concurrency is 1.
+
+Immediately before Codex starts, the runner reconstructs only the current row from its coordinator-local frozen fixture payload and recomputes `fixture_sha256`. Any stale runtime entry, symlink/junction boundary, path/identity mismatch, or fixture mismatch fails closed before model execution. The evaluator checks the deterministic post-condition while the active workspace still exists; the row workspace is then removed and verified absent on success, task failure, timeout, parser failure, or exception. Profile cleanup and workspace cleanup are independent and both must pass.
+
+This topology removes semantic arm/campaign cues and sibling/future-row leakage; it is not a general filesystem confidentiality boundary. Bounded contamination detection may compare already-emitted Codex command/cwd/workdir metadata only against the known coordinator root and other frozen row-workspace bindings. An observed coordinator or other-row access marks the row protocol-contaminated and invalid. Normalized contamination evidence stores only the kind, command id, and a path hash; raw command text and raw paths remain in host-local raw execution evidence.
+
+Previously prepared arm-labeled/eager-workspace campaigns are historical/exploratory only and cannot be resumed or mixed into a new blinded denominator.
 
 ## Boundary detectors
 
@@ -60,7 +72,7 @@ Cost fields include the final host-exposed token snapshot when valid, optional m
 Missing measurements remain missing. Missing token, latency, completion, or adjudication evidence is never coerced to zero.
 ## Validity versus negative outcome
 
-Protocol breakage invalidates a trial; task failure does not. Examples of invalidity include duplicate trial identity, prompt/workspace mismatch, wrong or unobserved arm catalog, and failure to execute a manifest-frozen first command.
+Protocol breakage invalidates a trial; task failure does not. Examples of invalidity include duplicate trial identity, prompt/workspace mismatch, wrong or unobserved arm catalog, failure to execute a manifest-frozen first command, stale/peer runtime workspace state, failed cleanup, or bounded evidence that the row accessed coordinator/other-row campaign data.
 
 A protocol-conforming trial that fails to complete the task remains a valid negative outcome. Invalid trials are reported with reasons and stay outside routing-performance denominators.
 
@@ -122,6 +134,8 @@ Holdout material is created from a fresh unseen candidate pool only after train-
 ## Canary and timeout calibration evidence
 
 Before scored execution, S must prove the companion Skill is visible and the intended Reliability MCP is reachable. M must prove, through a supported reversible setup, that the companion Skill is absent while the exact same Reliability MCP remains reachable. If that state cannot be established, the campaign is `BLOCKED` rather than simulated. Restore S afterward to prove reversibility.
+
+After any row-isolation implementation change, a fresh non-scored leakage canary must also prove that the model-visible cwd/ancestors are semantically neutral, the runtime root contains only the active opaque row, no peer/future row is pre-materialized, coordinator/evidence data is outside runtime ancestry, frozen prompt/fixture/runtime/catalog identities pass, and profile/workspace cleanup both pass. Any contamination evidence blocks scored execution.
 
 Timeout calibration uses exactly 3 representative task shapes x 2 arms x 2 repeats = 12 valid non-scored turns. Canary and calibration evidence never enters recall, false-activation, token-cost, task-completion, or routing-winner denominators.
 

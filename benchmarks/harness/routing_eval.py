@@ -178,6 +178,14 @@ def _opaque_token(token_factory=None) -> str:
     return value
 
 
+def _path_is_relative_to(child: pathlib.Path, parent: pathlib.Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def prepare_campaign(
     cases: list[dict],
     output_root: pathlib.Path,
@@ -198,13 +206,15 @@ def prepare_campaign(
         seen_ids.add(case["case_id"])
     output_root = output_root.resolve(strict=False)
     runtime_parent = (runtime_parent or pathlib.Path(tempfile.gettempdir())).resolve(strict=False)
+    campaign_token = _opaque_token(token_factory)
+    runtime_root = (runtime_parent / campaign_token).resolve(strict=False)
+    if _path_is_relative_to(runtime_root, output_root) or _path_is_relative_to(output_root, runtime_root):
+        raise ValueError("coordinator and runtime roots must be disjoint")
     prompts_dir = output_root / "prompts"
     fixtures_dir = output_root / "fixtures"
     prompts_dir.mkdir(parents=True, exist_ok=True)
     fixtures_dir.mkdir(parents=True, exist_ok=True)
     runtime_parent.mkdir(parents=True, exist_ok=True)
-    campaign_token = _opaque_token(token_factory)
-    runtime_root = runtime_parent / campaign_token
     try:
         runtime_root.mkdir()
     except FileExistsError as exc:
