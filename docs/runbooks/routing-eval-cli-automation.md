@@ -26,6 +26,7 @@ pwsh.exe -NoProfile -File .\scripts\run-routing-automation.ps1 profile-check `
   --codex <codex-desktop-bundled.exe> `
   --codex-version 0.148.0-alpha.9 `
   --codex-sha256 <sha256> `
+  --model gpt-5.6-luna `
   --skill-path <powershell-reliability-SKILL.md> `
   --skill-sha256 <sha256> `
   --mcp-path <powershell-agent-reliability.exe> `
@@ -52,6 +53,7 @@ pwsh.exe -NoProfile -File .\scripts\run-routing-automation.ps1 run-row `
   --codex <codex-desktop-bundled.exe> `
   --codex-version 0.148.0-alpha.9 `
   --codex-sha256 <sha256> `
+  --model gpt-5.6-luna `
   --skill-path <powershell-reliability-SKILL.md> `
   --skill-sha256 <sha256> `
   --mcp-path <powershell-agent-reliability.exe> `

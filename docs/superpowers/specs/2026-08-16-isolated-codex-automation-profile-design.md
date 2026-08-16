@@ -94,7 +94,7 @@ Each manifest row must resolve to the prepared external campaign layout (`prompt
 8. profile cleanup in a `finally` path.
 The exact CLI command is constructed as an argument array, never one nested command string. The implementation must pin the bundled CLI path and verify its version/hash before campaign execution. Prompt bytes are redirected through stdin so shell quoting cannot change the manifest-frozen prompt.
 
-The runner uses `--ephemeral --json`, the frozen workspace via `-C`, and the arm profile through `CODEX_HOME`. It must not use `--dangerously-bypass-approvals-and-sandbox`; the experiment preserves the frozen approval/sandbox policy from configuration.
+The runner uses `--ephemeral --json`, the frozen workspace via `-C`, the arm profile through `CODEX_HOME`, and an explicit frozen `--model` value. The model is not inferred from an absent live-config `model` field. It must not use `--dangerously-bypass-approvals-and-sandbox`; the experiment preserves the frozen approval/sandbox policy from configuration.
 
 The existing 360-second campaign timeout remains the external kill boundary for both arms. Timeout handling terminates the Windows process tree, then uses a bounded settle period and a final parent-kill fallback rather than waiting indefinitely. The runner records task wall-clock around the Codex process itself. Timing is secondary paired evidence: valid slow rows are retained, S/M order is balanced, and unstable timing is reported as inconclusive rather than forced into an arm-selection claim.
 

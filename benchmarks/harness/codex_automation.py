@@ -58,7 +58,7 @@ def _git_rev_parse(ref: str, runner=subprocess.run) -> str:
     return value.lower()
 
 
-def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skill_sha256: str, mcp_path: pathlib.Path, mcp_sha256: str, profile_meta: dict) -> dict:
+def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skill_sha256: str, mcp_path: pathlib.Path, mcp_sha256: str, profile_meta: dict, model: str | None = None) -> dict:
     return {
         "schema_version": 1,
         "cli_path": str(pathlib.Path(cli_identity["path"]).resolve(strict=False)),
@@ -69,7 +69,7 @@ def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skil
         "mcp_path": str(mcp_path.resolve(strict=False)),
         "mcp_sha256": mcp_sha256.upper(),
         "live_config_sha256": profile_meta["live_config_sha256"].upper(),
-        "model": profile_meta.get("model"),
+        "model": model if model is not None else profile_meta.get("model"),
         "provider": profile_meta.get("provider"),
         "provider_base_url": profile_meta.get("provider_base_url"),
         "provider_wire_api": profile_meta.get("provider_wire_api"),
@@ -280,8 +280,12 @@ def verify_cli_identity(exe: pathlib.Path, expected_version: str, expected_sha25
     return {"version": actual_version, "sha256": actual_hash, "path": str(exe)}
 
 
-def codex_argv(exe: pathlib.Path, workspace: pathlib.Path) -> list[str]:
-    return [exe.as_posix(), "exec", "--ephemeral", "--json", "-C", workspace.as_posix(), "-"]
+def codex_argv(exe: pathlib.Path, workspace: pathlib.Path, model: str | None = None) -> list[str]:
+    argv = [exe.as_posix(), "exec", "--ephemeral", "--json"]
+    if model:
+        argv.extend(["--model", model])
+    argv.extend(["-C", workspace.as_posix(), "-"])
+    return argv
 
 
 def remove_profile(profile: pathlib.Path) -> None:
@@ -311,6 +315,7 @@ def run_codex_process(
     popen_factory=subprocess.Popen,
     tree_killer=_kill_process_tree_windows,
     clock=time.monotonic,
+    model: str | None = None,
 ) -> dict:
     env = os.environ.copy()
     env["CODEX_HOME"] = str(profile)
@@ -322,7 +327,7 @@ def run_codex_process(
     started_at = clock()
     with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
         process = popen_factory(
-            codex_argv(exe, workspace),
+            codex_argv(exe, workspace, model=model),
             stdin=subprocess.PIPE,
             stdout=stdout_handle,
             stderr=stderr_handle,
@@ -636,6 +641,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mcp-sha256", required=True)
     parser.add_argument("--evidence-root", type=pathlib.Path, required=True)
     parser.add_argument("--identity-lock", type=pathlib.Path, required=True)
+    parser.add_argument("--model", required=True)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -785,7 +791,7 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
         profile, meta, skills, mcp_catalog = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
-        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, meta)
+        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, meta, model=args.model)
         identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=True)
         result = {
             "schema_version": 1,
@@ -793,6 +799,7 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
             "arm": args.arm,
             "cli_version": cli_identity["version"],
             "cli_sha256": cli_identity["sha256"],
+            "model": args.model,
             "live_config_sha256": meta["live_config_sha256"],
             "profile_fingerprint": meta["profile_fingerprint"],
             "mcp_sha256": mcp_hash,
@@ -854,12 +861,12 @@ def execute_run_row(
         profile, profile_meta, skills, _ = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
-        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, profile_meta)
+        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, profile_meta, model=args.model)
         identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=False)
         output_dir.mkdir(parents=True)
         process_result = process_runner(
             args.codex, workspace, profile, prompt_bytes,
-            output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout,
+            output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout, model=args.model,
         )
         parsed = json_parser(output_dir / "stdout.jsonl", allow_truncated_tail=bool(process_result.get("timed_out")))
         validate_cli_terminal_state(process_result, parsed)
@@ -876,6 +883,7 @@ def execute_run_row(
         "cli_sha256": cli_identity["sha256"],
         "mcp_sha256": mcp_hash,
         "skill_sha256": skill_hash,
+        "model": args.model,
         "campaign_identity_sha256": identity_sha,
         "harness_git_head": identity["harness_git_head"],
         "public_main_sha": identity["public_main_sha"],
