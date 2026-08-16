@@ -449,6 +449,11 @@ class ManifestTopologyTests(unittest.TestCase):
             bad = dict(row); bad["prompt_path"] = str(root/"other.txt")
             with self.assertRaisesRegex(ValueError, "prompt path"):
                 codex_automation.validate_manifest_row_paths(manifest, bad)
+            traversal = dict(row); traversal["case_key"] = "../escape"
+            traversal["prompt_path"] = str(root / "escape.txt")
+            traversal["workspace"] = str(root / "workspaces" / "escape")
+            with self.assertRaisesRegex(ValueError, "case_key"):
+                codex_automation.validate_manifest_row_paths(manifest, traversal)
 
 
 class RunRowWorkflowTests(unittest.TestCase):

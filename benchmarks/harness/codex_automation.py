@@ -603,11 +603,18 @@ def validate_manifest_row_paths(manifest_path: pathlib.Path, row: dict) -> None:
     arm = row.get("arm")
     if not isinstance(case_key, str) or not case_key or arm not in {"S", "M"}:
         raise ValueError("manifest row must contain a valid case_key and arm")
+    if case_key in {".", ".."} or pathlib.PureWindowsPath(case_key).name != case_key:
+        raise ValueError("manifest case_key must be a single safe path component")
     expected_prompt = (campaign_root / "prompts" / f"{case_key}.txt").resolve(strict=False)
+    expected_workspace = (campaign_root / "workspaces" / arm / case_key).resolve(strict=False)
+    for expected in (expected_prompt, expected_workspace):
+        try:
+            expected.relative_to(campaign_root)
+        except ValueError as exc:
+            raise ValueError("manifest case_key escapes the prepared campaign root") from exc
     actual_prompt = pathlib.Path(row.get("prompt_path", "")).resolve(strict=False)
     if actual_prompt != expected_prompt:
         raise ValueError("manifest prompt path must use the prepared campaign layout")
-    expected_workspace = (campaign_root / "workspaces" / arm / case_key).resolve(strict=False)
     actual_workspace = pathlib.Path(row.get("workspace", "")).resolve(strict=False)
     if actual_workspace != expected_workspace:
         raise ValueError("manifest workspace path must use the prepared campaign layout")

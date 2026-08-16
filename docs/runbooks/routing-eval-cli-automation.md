@@ -57,7 +57,7 @@ pwsh.exe -NoProfile -File .\scripts\run-routing-automation.ps1 run-row `
   --evidence-root <host-evidence-root>
 ```
 
-The runner requires the prepared campaign layout: `<campaign-root>/prompts/<case-key>.txt` and `<campaign-root>/workspaces/<arm>/<case-key>`, with the campaign root outside the repository. The prompt is read from the frozen manifest file and sent once through stdin. There is no follow-up steering. Immediately before profile/model execution, the runner re-hashes the actual UTF-8 text fixture tree and requires the manifest `fixture_sha256`; a stale or previously mutated workspace fails closed instead of being rerun. Raw CLI stdout JSONL and bounded stderr stay under the host-local evidence root. The temporary secret-bearing profile is deleted after the row.
+The runner requires the prepared campaign layout: `<campaign-root>/prompts/<case-key>.txt` and `<campaign-root>/workspaces/<arm>/<case-key>`, with the campaign root outside the repository. `case-key` must be one safe path component; traversal/escaped campaign paths are rejected. The prompt is read from the frozen manifest file and sent once through stdin. There is no follow-up steering. Immediately before profile/model execution, the runner re-hashes the actual UTF-8 text fixture tree and requires the manifest `fixture_sha256`; a stale or previously mutated workspace fails closed instead of being rerun. Raw CLI stdout JSONL and bounded stderr stay under the host-local evidence root. The temporary secret-bearing profile is deleted after the row.
 
 The runner records command-process state separately from deterministic task outcome. Exit code 0 is not task success. A valid row with a failed workspace post-condition remains a task negative rather than an infrastructure retry.
 
