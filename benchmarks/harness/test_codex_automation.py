@@ -436,6 +436,21 @@ class CommandWorkflowTests(unittest.TestCase):
             self.assertTrue((args.evidence_root / "profile-check-S.json").exists())
 
 
+class ManifestTopologyTests(unittest.TestCase):
+    def test_validate_manifest_row_paths_requires_campaign_prompt_and_workspace_layout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            manifest = root / "manifest.jsonl"
+            row = {"case_key": "X1-T01", "arm": "M", "prompt_path": str(root/"prompts"/"X1-T01.txt"), "workspace": str(root/"workspaces"/"M"/"X1-T01")}
+            codex_automation.validate_manifest_row_paths(manifest, row)
+            bad = dict(row); bad["workspace"] = str(root/".."/"elsewhere")
+            with self.assertRaisesRegex(ValueError, "workspace path"):
+                codex_automation.validate_manifest_row_paths(manifest, bad)
+            bad = dict(row); bad["prompt_path"] = str(root/"other.txt")
+            with self.assertRaisesRegex(ValueError, "prompt path"):
+                codex_automation.validate_manifest_row_paths(manifest, bad)
+
+
 class RunRowWorkflowTests(unittest.TestCase):
     def test_workspace_fixture_sha256_matches_prepared_text_tree(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -449,9 +464,9 @@ class RunRowWorkflowTests(unittest.TestCase):
     def test_execute_run_row_rejects_mutated_fixture_before_profile_or_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            workspace = root / "workspace"; workspace.mkdir()
+            workspace = root / "workspaces" / "M" / "X1-T01"; workspace.mkdir(parents=True)
             (workspace / "stale.txt").write_text("stale", encoding="utf-8")
-            prompt = root / "prompt.txt"; prompt.write_text("do task\n", encoding="utf-8", newline="\n")
+            prompt = root / "prompts" / "X1-T01.txt"; prompt.parent.mkdir(); prompt.write_text("do task\n", encoding="utf-8", newline="\n")
             manifest = root / "manifest.jsonl"
             row = {"sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M", "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(), "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)), "fixture_sha256": codex_automation.routing_eval._fixture_sha256({}), "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}}
             manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
@@ -468,8 +483,8 @@ class RunRowWorkflowTests(unittest.TestCase):
     def test_execute_run_row_preserves_task_failure_as_receipt_and_cleans_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            workspace = root / "workspace"; workspace.mkdir()
-            prompt = root / "prompt.txt"; prompt.write_text("do task\n", encoding="utf-8", newline="\n")
+            workspace = root / "workspaces" / "M" / "X1-T01"; workspace.mkdir(parents=True)
+            prompt = root / "prompts" / "X1-T01.txt"; prompt.parent.mkdir(); prompt.write_text("do task\n", encoding="utf-8", newline="\n")
             manifest = root / "manifest.jsonl"
             row = {"sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M", "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(), "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)), "fixture_sha256": codex_automation.routing_eval._fixture_sha256({}), "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}}
             manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")

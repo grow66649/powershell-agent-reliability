@@ -81,7 +81,7 @@
 - [ ] **Step 1: Write failing fixtures/tests** for command execution items, MCP call items, turn completion/error, token usage, malformed/truncated JSONL, and missing token fields remaining `None` rather than synthesized.
 - [ ] **Step 2: Run focused tests** and verify RED.
 - [ ] **Step 3: Implement event adapter** that counts started-or-completed native command/MCP item identities without double-counting completion updates, preserves incomplete-attempt counts, requires a terminal turn event for non-timeout rows, and captures exact token fields when present.
-- [ ] **Step 4: Reuse `routing_eval._evaluate_workspace_post_condition` or the narrow existing helper** to read final workspace truth independently of final prose/process exit; before the model call, re-hash the prepared workspace UTF-8 text tree and require it to match the manifest fixture SHA so stale/reused workspaces fail closed.
+- [ ] **Step 4: Validate the prepared external campaign topology** (`prompts/<case-key>.txt`, `workspaces/<arm>/<case-key>`), then reuse `routing_eval._evaluate_workspace_post_condition` or the narrow existing helper to read final workspace truth independently of final prose/process exit; before the model call, re-hash the prepared workspace UTF-8 text tree and require it to match the manifest fixture SHA so stale/reused workspaces fail closed.
 - [ ] **Step 5: Emit one normalized execution receipt** with process state, post-condition truth, prompt/workspace/profile/MCP/CLI hashes, observed Skill catalog, tool counts, token fields, and cleanup result.
 - [ ] **Step 6: Run focused tests**; expect PASS.
 ### Task 5: Operator entrypoint and runbook

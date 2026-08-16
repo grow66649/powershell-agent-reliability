@@ -597,6 +597,22 @@ def materialize_profile(
         raise
 
 
+def validate_manifest_row_paths(manifest_path: pathlib.Path, row: dict) -> None:
+    campaign_root = ensure_external_evidence_root(manifest_path.parent)
+    case_key = row.get("case_key")
+    arm = row.get("arm")
+    if not isinstance(case_key, str) or not case_key or arm not in {"S", "M"}:
+        raise ValueError("manifest row must contain a valid case_key and arm")
+    expected_prompt = (campaign_root / "prompts" / f"{case_key}.txt").resolve(strict=False)
+    actual_prompt = pathlib.Path(row.get("prompt_path", "")).resolve(strict=False)
+    if actual_prompt != expected_prompt:
+        raise ValueError("manifest prompt path must use the prepared campaign layout")
+    expected_workspace = (campaign_root / "workspaces" / arm / case_key).resolve(strict=False)
+    actual_workspace = pathlib.Path(row.get("workspace", "")).resolve(strict=False)
+    if actual_workspace != expected_workspace:
+        raise ValueError("manifest workspace path must use the prepared campaign layout")
+
+
 def load_manifest_row(path: pathlib.Path, sequence: int) -> dict:
     matches = []
     with path.open("r", encoding="utf-8") as handle:
@@ -669,6 +685,7 @@ def execute_run_row(
     if mcp_hash.casefold() != args.mcp_sha256.casefold():
         raise ValueError("Reliability MCP SHA256 mismatch")
     row = load_manifest_row(args.manifest, args.sequence)
+    validate_manifest_row_paths(args.manifest, row)
     if row.get("arm") != args.arm:
         raise ValueError("requested arm does not match manifest row")
     prompt_path = pathlib.Path(row["prompt_path"])

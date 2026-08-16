@@ -82,7 +82,7 @@ Do not copy OAuth state for unrelated connectors. Do not start or authenticate u
 
 ## Per-row execution
 
-Each manifest row receives:
+Each manifest row must resolve to the prepared external campaign layout (`prompts/<case-key>.txt` and `workspaces/<arm>/<case-key>` under the manifest directory); arbitrary prompt/workspace paths are rejected. Each admitted row receives:
 
 1. a fresh disposable workspace materialized from its frozen fixture, with the actual pre-run UTF-8 text tree re-hashed against the manifest fixture identity before any profile/model call;
 2. a fresh disposable `CODEX_HOME` cloned from the campaign base template;
