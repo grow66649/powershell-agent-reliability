@@ -248,10 +248,12 @@ class CliJsonAdapterTests(unittest.TestCase):
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         return path
 
-    def test_parse_cli_jsonl_counts_completed_command_mcp_and_exact_usage(self):
+    def test_parse_cli_jsonl_counts_started_command_mcp_and_exact_usage(self):
         rows = [
             {"type": "thread.started", "thread_id": "thread-1"},
+            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "cmd.exe /c exit 0", "exit_code": None, "status": "in_progress"}},
             {"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "cmd.exe /c exit 0", "exit_code": 0, "status": "completed"}},
+            {"type": "item.started", "item": {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "inspect_environment", "arguments": {}, "status": "in_progress"}},
             {"type": "item.completed", "item": {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "inspect_environment", "arguments": {}, "status": "completed", "error": None}},
             {"type": "item.completed", "item": {"id": "a1", "type": "agent_message", "text": "READY"}},
             {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 20, "cache_write_input_tokens": 0, "output_tokens": 7, "reasoning_output_tokens": 3}},
@@ -265,6 +267,18 @@ class CliJsonAdapterTests(unittest.TestCase):
         self.assertEqual(parsed["tokens"]["input_tokens"], 100)
         self.assertIsNone(parsed["tokens"]["total_tokens"])
         self.assertEqual(parsed["final_message"], "READY")
+
+    def test_parse_cli_jsonl_rejects_orphan_tool_completions(self):
+        orphan_items = [
+            {"id": "c1", "type": "command_execution", "exit_code": 0, "status": "completed"},
+            {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "diagnose_failure", "status": "completed"},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for item in orphan_items:
+                with self.subTest(item_type=item["type"]):
+                    path = self._write_jsonl(temp_dir, [{"type": "item.completed", "item": item}])
+                    with self.assertRaisesRegex(ValueError, "completion without matching start"):
+                        codex_automation.parse_cli_jsonl(path)
 
     def test_parse_cli_jsonl_counts_started_attempts_and_deduplicates_completion(self):
         rows = [
@@ -411,6 +425,11 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.identity_lock, pathlib.Path("C:/evidence/campaign-identity.json"))
         self.assertEqual(args.model, "gpt-5.6-luna")
         self.assertEqual(args.public_main_sha, "0" * 40)
+        self.assertFalse(args.initialize_identity_lock)
+
+    def test_profile_check_parser_requires_explicit_identity_lock_initialization(self):
+        args = codex_automation.parse_args(["profile-check", *self._common(), "--initialize-identity-lock"])
+        self.assertTrue(args.initialize_identity_lock)
 
     def test_run_row_parser_requires_manifest_sequence_and_timeout(self):
         args = codex_automation.parse_args(["run-row", *self._common(), "--manifest", "C:/campaign/manifest.jsonl", "--sequence", "7", "--timeout", "360"])
@@ -473,7 +492,7 @@ class CommandWorkflowTests(unittest.TestCase):
                 (root / name).write_bytes(name.encode())
             profile = root / "secret-profile"; profile.mkdir()
             materialize = mock.Mock(return_value=(profile, {"live_config_sha256": "1" * 64, "profile_fingerprint": "2" * 64, "provider": "codex_local_access", "model": "gpt-5.6-luna", "effort": "max"}, [{"name": "powershell-reliability", "path": PSR_SKILL}], [{"name": "psr_reliability_native", "enabled": True}]))
-            args = mock.Mock(arm="S", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json")
+            args = mock.Mock(arm="S", model="gpt-5.6-luna", public_main_sha="0"*40, initialize_identity_lock=True, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json")
             result = codex_automation.execute_profile_check(args, verify_cli=mock.Mock(return_value={"version":"0.148.0-alpha.9","sha256":args.codex_sha256,"path":str(args.codex)}), materialize=materialize)
             self.assertEqual(result["status"], "PASS")
             self.assertFalse(profile.exists())
@@ -552,7 +571,7 @@ class CampaignIdentityLockTests(unittest.TestCase):
                 return profile, meta, [{"name": "powershell-reliability", "path": PSR_SKILL}], [{"name": "psr_reliability_native", "enabled": True}]
 
             args = mock.Mock(
-                arm="S", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe",
+                arm="S", model="gpt-5.6-luna", public_main_sha="0"*40, initialize_identity_lock=True, live_config=root/"config.toml", codex=root/"codex.exe",
                 codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"),
                 skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"),
                 mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"),
@@ -564,9 +583,15 @@ class CampaignIdentityLockTests(unittest.TestCase):
             self.assertEqual(first["campaign_identity_sha256"], codex_automation.sha256_file(identity_lock))
             self.assertEqual(json.loads(identity_lock.read_text(encoding="utf-8"))["model"], "gpt-5.6-luna")
 
+            args.initialize_identity_lock = False
             drift_verify = mock.Mock(return_value={"version":"0.148.0-alpha.9","sha256":"F"*64,"path":str(args.codex)})
             with self.assertRaisesRegex(ValueError, "campaign identity"):
                 codex_automation.execute_profile_check(args, verify_cli=drift_verify, materialize=materialize_once)
+
+            identity_lock.unlink()
+            with self.assertRaisesRegex(ValueError, "identity lock is required"):
+                codex_automation.execute_profile_check(args, verify_cli=verify, materialize=materialize_once)
+            self.assertFalse(identity_lock.exists())
 
 
 class RunRowWorkflowTests(unittest.TestCase):

@@ -59,7 +59,7 @@ The provider table may contain credentials or credential-bearing headers. Those 
 
 The secret-bearing base template and per-row profile directories must inherit or receive an ACL restricted to the current Windows user. Cleanup of the secret-bearing profile is an explicit post-condition. A cleanup failure blocks the campaign until the leftover profile is removed safely; the runner must not weaken ACLs to force cleanup.
 
-A redacted profile manifest is preserved separately. It records non-secret runtime identity, source config hash, generated profile hash/fingerprint, Skill surface, MCP executable hash, and cleanup result. Before formal rows, `profile-check` creates or verifies one shared non-secret campaign identity lock binding the actual bundled CLI path/version/hash, Skill/MCP hashes, live-config hash, effective model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and an explicitly supplied exact public-main SHA. The runner must not depend on a local `main` ref, because shallow PR CI and detached checkouts may not have one. Every S/M row must match the same lock; provider credentials/headers are never stored in it.
+A redacted profile manifest is preserved separately. It records non-secret runtime identity, source config hash, generated profile hash/fingerprint, Skill surface, MCP executable hash, and cleanup result. Before formal rows, one explicit initialization profile check creates the shared non-secret campaign identity lock; ordinary later profile checks require that lock to already exist and fail closed if it is missing. The lock binds the actual bundled CLI path/version/hash, Skill/MCP hashes, live-config hash, effective model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and an explicitly supplied exact public-main SHA. The runner must not depend on a local `main` ref, because shallow PR CI and detached checkouts may not have one. Every later S/M profile check and row must match the same existing lock; provider credentials/headers are never stored in it.
 
 ## Skill isolation
 
@@ -115,7 +115,7 @@ Parity is established in layers before CLI automation can replace manual train e
 2. **Surface identity:** S exposes the Reliability Skill and M does not; both expose the same Reliability MCP tools; no unexpected MCP/plugin surface is present in the isolated profile.
 3. **Capability sessions:** run exactly four fresh non-scored capability sessions: Desktop-S, Desktop-M, CLI-S, and CLI-M. They may explicitly ask whether `powershell-reliability` is available/readable and may perform an explicit Reliability MCP canary. Self-report alone is insufficient; these sessions are separate from natural-task trials and cannot be reused as scored threads.
 4. **Behavioral canaries:** run four train-visible natural cases (`TC-A`, `TT-A`, `NG-B`, `NW-A`) across Desktop-S/M and CLI-S/M for 16 fresh natural sessions with byte-equivalent prompts/fixtures. Natural prompts do not name the Skill, MCP, arm, evaluator, or expected activation. Deterministic post-condition truth plus command-failure-boundary, MCP-order, false-activation, and safety direction must satisfy the reviewed parity rule. A valid mismatch may repeat the entire four-cell case bundle once; persistent runtime-specific divergence fails parity and unstable evidence remains inconclusive.
-5. **Evidence compatibility:** automated JSONL contains enough bounded facts for the existing collector/scorer or an explicitly reviewed adapter to produce the same trial semantics as Desktop rollout evidence. `item.started` establishes an attempt, `item.completed` records terminal outcome (including failed/declined completion), and started-only attempts remain visible. A timed-out row may preserve a valid prefix when only the final non-empty JSONL record is truncated; non-timeout or mid-stream corruption fails closed, and non-timeout output must contain a terminal turn event.
+5. **Evidence compatibility:** automated JSONL contains enough bounded facts for the existing collector/scorer or an explicitly reviewed adapter to produce the same trial semantics as Desktop rollout evidence. `item.started` establishes an attempt, `item.completed` records terminal outcome (including failed/declined completion), and started-only attempts remain visible. A command/MCP completion without a matching prior start is protocol-invalid and fails closed rather than creating an invocation. A timed-out row may preserve a valid prefix when only the final non-empty JSONL record is truncated; non-timeout or mid-stream corruption fails closed, and non-timeout output must contain a terminal turn event.
 
 Until all applicable parity layers pass, CLI runs are screening/engineering evidence only. Even after parity, final product admission retains a bounded fresh Desktop confirmation sample.
 
@@ -188,10 +188,10 @@ Implementation begins with RED tests for:
 - producing exactly one Reliability MCP in the generated profile;
 - S catalog conformance and M catalog conformance from `debug prompt-input` output;
 - prompt delivery through stdin without byte drift;
-- one shared campaign identity lock across S/M rows, with runtime drift rejected before model execution;
+- one shared campaign identity lock across S/M rows, created only by an explicit initialization profile check, with ordinary later profile checks requiring the existing lock and runtime drift rejected before model execution;
 - one fresh `CODEX_HOME`/workspace/output namespace per row;
 - strict Windows-safe `case-key` validation and evidence-root/workspace separation;
-- started/completed command/MCP identity pairing, failed/declined terminal outcomes, and timeout final-line truncation handling;
+- started/completed command/MCP identity pairing, orphan command/MCP completions rejected as protocol-invalid, failed/declined terminal outcomes, and timeout final-line truncation handling;
 - timeout versus process failure versus valid task failure classification;
 - deterministic post-condition truth remaining independent from process exit/final prose;
 - cleanup success and fail-closed handling of leftover secret-bearing profiles;

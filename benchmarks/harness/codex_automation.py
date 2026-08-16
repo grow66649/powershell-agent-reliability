@@ -460,7 +460,18 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
                 target = commands_by_id if item_kind == "command_execution" else mcp_calls_by_id
                 started_ids = command_started_ids if item_kind == "command_execution" else mcp_started_ids
                 completed_ids = command_completed_ids if item_kind == "command_execution" else mcp_completed_ids
-                summary = target.setdefault(item_id, {"id": item_id, "type": item_kind, "started_event_index": None, "completed_event_index": None})
+                if kind == "item.started":
+                    summary = target.setdefault(item_id, {"id": item_id, "type": item_kind, "started_event_index": None, "completed_event_index": None})
+                    started_ids.add(item_id)
+                    if summary["started_event_index"] is None:
+                        summary["started_event_index"] = event_count
+                else:
+                    summary = target.get(item_id)
+                    if summary is None or item_id not in started_ids:
+                        raise ValueError(f"CLI {item_kind} completion without matching start at line {line_number}")
+                    completed_ids.add(item_id)
+                    summary["completed_event_index"] = event_count
+                    summary["terminal_status"] = item.get("status")
                 if item_kind == "command_execution":
                     for field in ("exit_code",):
                         if field in item:
@@ -469,14 +480,6 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
                     for field in ("server", "tool"):
                         if field in item:
                             summary[field] = item[field]
-                if kind == "item.started":
-                    started_ids.add(item_id)
-                    if summary["started_event_index"] is None:
-                        summary["started_event_index"] = event_count
-                else:
-                    completed_ids.add(item_id)
-                    summary["completed_event_index"] = event_count
-                    summary["terminal_status"] = item.get("status")
             elif kind == "item.completed" and item_kind == "agent_message" and isinstance(item.get("text"), str):
                 final_message = item["text"]
         elif kind == "turn.completed":
@@ -652,6 +655,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     profile = subparsers.add_parser("profile-check")
     _add_common_args(profile)
+    profile.add_argument("--initialize-identity-lock", action="store_true")
     run_row = subparsers.add_parser("run-row")
     _add_common_args(run_row)
     run_row.add_argument("--manifest", type=pathlib.Path, required=True)
@@ -795,7 +799,9 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
         identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, meta, model=args.model, public_main_sha=args.public_main_sha)
-        identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=True)
+        identity_sha = verify_or_create_campaign_identity_lock(
+            args.identity_lock, identity, allow_create=bool(args.initialize_identity_lock)
+        )
         result = {
             "schema_version": 1,
             "status": "PASS",

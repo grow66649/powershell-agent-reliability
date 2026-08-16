@@ -17,7 +17,7 @@ Keep provider tokens, authorization headers, raw JSONL, and temporary profiles o
 
 ## Profile check
 
-Run `profile-check` before model-bearing rows. It makes no model request. It verifies the exact CLI version/hash, Skill and MCP hashes, creates a temporary restricted profile, disables unrelated apps/plugins/Skills, and observes the final arm surface. The first profile check creates the non-secret campaign identity lock if it is absent; every later profile check and row must match that same lock.
+Run `profile-check` before model-bearing rows. It makes no model request. It verifies the exact CLI version/hash, Skill and MCP hashes, creates a temporary restricted profile, disables unrelated apps/plugins/Skills, and observes the final arm surface. Campaign lock creation is an explicit one-time initialization: the first profile check must include `--initialize-identity-lock`. Ordinary later profile checks omit that flag and fail closed if the lock is missing; every later profile check and row must match the same existing lock.
 
 ```powershell
 pwsh.exe -NoProfile -File .\scripts\run-routing-automation.ps1 profile-check `
@@ -33,10 +33,11 @@ pwsh.exe -NoProfile -File .\scripts\run-routing-automation.ps1 profile-check `
   --mcp-path <powershell-agent-reliability.exe> `
   --mcp-sha256 <sha256> `
   --evidence-root <host-evidence-root> `
-  --identity-lock <campaign-root>\campaign-identity.json
+  --identity-lock <campaign-root>\campaign-identity.json `
+  --initialize-identity-lock
 ```
 
-Run the same command with `--arm M`. S must expose only `powershell-reliability`; M must expose no Skills. Both arms must expose exactly the same `psr_reliability_native` MCP command. The shared lock binds the actual CLI path/version/hash, Skill and MCP hashes, live-config hash, model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and the explicitly supplied public-main SHA; secret provider values are never stored in the lock. The runner does not require a local `main` ref, so shallow PR CI and detached checkouts can still exercise the automation tests.
+Run the same command with `--arm M` but omit `--initialize-identity-lock`; the existing lock is mandatory. S must expose only `powershell-reliability`; M must expose no Skills. Both arms must expose exactly the same `psr_reliability_native` MCP command. The shared lock binds the actual CLI path/version/hash, Skill and MCP hashes, live-config hash, model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and the explicitly supplied public-main SHA; secret provider values are never stored in the lock. The runner does not require a local `main` ref, so shallow PR CI and detached checkouts can still exercise the automation tests.
 
 A failed catalog, hash, ACL, config, or cleanup check blocks the run. Do not repair a profile in place and continue using it.
 
@@ -83,6 +84,6 @@ Capability canaries may directly ask whether the Skill is available and may expl
 
 ## Evidence and cleanup
 
-`--ephemeral` means the runner must capture stdout JSONL directly; it must not wait for a session rollout file. Command/MCP attempts are paired by item id: `item.started` establishes an attempt, `item.completed` records its terminal outcome, and terminal `failed`/`declined` items are complete rather than incomplete. A timed-out row may preserve a valid JSONL prefix when only the final non-empty record is truncated; non-timeout or mid-stream malformed JSONL still fails closed. A non-timeout row without a terminal `turn.completed`/`turn.failed` event fails closed. Missing token fields remain `null` and are not synthesized. Each row also records `task_wall_clock_ms` around the Codex process. Compare time only across matched S/M rows with balanced order; keep valid slow rows and report unstable timing as inconclusive rather than forcing a winner.
+`--ephemeral` means the runner must capture stdout JSONL directly; it must not wait for a session rollout file. Command/MCP attempts are paired by item id: `item.started` establishes an attempt, `item.completed` records its terminal outcome, and terminal `failed`/`declined` items are complete rather than incomplete. A command/MCP `item.completed` without a matching prior `item.started` is protocol-invalid and fails closed; it is never counted as an invocation. A timed-out row may preserve a valid JSONL prefix when only the final non-empty record is truncated; non-timeout or mid-stream malformed JSONL still fails closed. A non-timeout row without a terminal `turn.completed`/`turn.failed` event fails closed. Missing token fields remain `null` and are not synthesized. Each row also records `task_wall_clock_ms` around the Codex process. Compare time only across matched S/M rows with balanced order; keep valid slow rows and report unstable timing as inconclusive rather than forcing a winner.
 
 A cleanup failure blocks the campaign. Do not weaken ACLs, sandboxing, approval policy, PowerShell profiles, or global environment settings to force a run through.
