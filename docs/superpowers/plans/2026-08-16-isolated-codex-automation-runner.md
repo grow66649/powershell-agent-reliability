@@ -64,7 +64,7 @@
 - [ ] **Step 2: Run focused tests** and verify RED.
 - [ ] **Step 3: Implement CLI identity verification** with SHA-256 plus `codex --version`; never use PATH fallback.
 - [ ] **Step 4: Implement Windows profile ACL restriction** using the current `whoami` identity and `icacls`; fail closed before the model call if restriction cannot be verified.
-- [ ] **Step 5: Implement subprocess launch** with `--ephemeral --json -C <workspace> -`, `CODEX_HOME`/`CODEX_SQLITE_HOME` in the child environment, prompt on stdin, raw stdout/stderr files, and timeout process-tree termination.
+- [ ] **Step 5: Implement subprocess launch** with `--ephemeral --json -C <workspace> -`, `CODEX_HOME`/`CODEX_SQLITE_HOME` in the child environment, prompt on stdin, raw stdout/stderr files, timeout process-tree termination, bounded post-kill settling, and a final parent-kill fallback.
 - [ ] **Step 6: Implement `finally` cleanup** and distinct infrastructure/task/timeout/cleanup states.
 - [ ] **Step 7: Run focused tests**; expect PASS.
 
@@ -81,7 +81,7 @@
 - [ ] **Step 1: Write failing fixtures/tests** for command execution items, MCP call items, turn completion/error, token usage, malformed/truncated JSONL, and missing token fields remaining `None` rather than synthesized.
 - [ ] **Step 2: Run focused tests** and verify RED.
 - [ ] **Step 3: Implement event adapter** that counts native commands, all MCP calls, Reliability MCP calls, and captures exact token fields when present.
-- [ ] **Step 4: Reuse `routing_eval._evaluate_workspace_post_condition` or the narrow existing helper** to read final workspace truth independently of final prose/process exit.
+- [ ] **Step 4: Reuse `routing_eval._evaluate_workspace_post_condition` or the narrow existing helper** to read final workspace truth independently of final prose/process exit; before the model call, re-hash the prepared workspace UTF-8 text tree and require it to match the manifest fixture SHA so stale/reused workspaces fail closed.
 - [ ] **Step 5: Emit one normalized execution receipt** with process state, post-condition truth, prompt/workspace/profile/MCP/CLI hashes, observed Skill catalog, tool counts, token fields, and cleanup result.
 - [ ] **Step 6: Run focused tests**; expect PASS.
 ### Task 5: Operator entrypoint and runbook

@@ -39,6 +39,23 @@ def load_live_config(path: pathlib.Path) -> dict:
         return tomllib.load(handle)
 
 
+def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
+    if not workspace.is_dir():
+        raise ValueError("workspace must exist before row execution")
+    files = {}
+    for path in sorted(workspace.rglob("*"), key=lambda item: item.as_posix().casefold()):
+        if path.is_symlink():
+            raise ValueError(f"workspace fixture must not contain symlinks: {path}")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(workspace).as_posix()
+        try:
+            files[relative] = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"workspace fixture must contain UTF-8 text files only: {relative}") from exc
+    return routing_eval._fixture_sha256(files)
+
+
 def _toml_literal(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -242,7 +259,14 @@ def run_codex_process(
             timed_out = True
             termination_reason = "timeout"
             tree_killer(process)
-            process.communicate()
+            try:
+                process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError("timed-out Codex process would not terminate") from exc
     task_wall_clock_ms = max(0, round((clock() - started_at) * 1000))
     return {
         "pid": process.pid,
@@ -628,6 +652,9 @@ def execute_run_row(
     workspace = pathlib.Path(row["workspace"])
     if routing_eval.workspace_identity(str(workspace)) != row.get("workspace_sha256"):
         raise ValueError("workspace identity mismatch")
+    actual_fixture_hash = workspace_fixture_sha256(workspace)
+    if actual_fixture_hash != row.get("fixture_sha256"):
+        raise ValueError("workspace fixture SHA256 mismatch")
     output_dir = args.evidence_root / f"{args.sequence:04d}-{row['case_key']}-{args.arm}"
     if output_dir.exists():
         raise FileExistsError(f"row evidence already exists: {output_dir}")

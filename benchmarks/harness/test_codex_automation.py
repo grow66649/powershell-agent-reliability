@@ -173,6 +173,28 @@ class CliExecutionTests(unittest.TestCase):
         self.assertEqual(kwargs["env"]["CODEX_HOME"], str(profile))
         self.assertEqual(kwargs["env"]["CODEX_SQLITE_HOME"], str(profile))
 
+    def test_run_codex_process_forces_parent_kill_if_tree_kill_does_not_settle(self):
+        fake = mock.Mock(pid=4321, returncode=None)
+        fake.communicate = mock.Mock(side_effect=[
+            subprocess.TimeoutExpired(cmd="codex", timeout=12),
+            subprocess.TimeoutExpired(cmd="codex", timeout=10),
+            (None, None),
+        ])
+        popen = mock.Mock(return_value=fake)
+        killer = mock.Mock()
+        clock = mock.Mock(side_effect=[20.0, 20.25])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir); profile = root / "profile"; workspace = root / "workspace"
+            profile.mkdir(); workspace.mkdir()
+            result = codex_automation.run_codex_process(
+                pathlib.Path("C:/Codex/codex.exe"), workspace, profile, b"exact prompt\n",
+                root / "stdout.jsonl", root / "stderr.log", 12, popen_factory=popen, tree_killer=killer, clock=clock,
+            )
+        self.assertTrue(result["timed_out"])
+        killer.assert_called_once_with(fake)
+        fake.kill.assert_called_once_with()
+        self.assertEqual(fake.communicate.call_count, 3)
+
 
 class ProfileAclAndRowCleanupTests(unittest.TestCase):
     def test_restrict_profile_acl_uses_current_identity_and_verifies_no_inheritance(self):
@@ -377,13 +399,41 @@ class CommandWorkflowTests(unittest.TestCase):
 
 
 class RunRowWorkflowTests(unittest.TestCase):
+    def test_workspace_fixture_sha256_matches_prepared_text_tree(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            (workspace / "nested").mkdir()
+            (workspace / "a.txt").write_text("A\n", encoding="utf-8", newline="\n")
+            (workspace / "nested" / "b.ps1").write_text("Write-Output B\n", encoding="utf-8", newline="\n")
+            expected = codex_automation.routing_eval._fixture_sha256({"a.txt": "A\n", "nested/b.ps1": "Write-Output B\n"})
+            self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), expected)
+
+    def test_execute_run_row_rejects_mutated_fixture_before_profile_or_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            workspace = root / "workspace"; workspace.mkdir()
+            (workspace / "stale.txt").write_text("stale", encoding="utf-8")
+            prompt = root / "prompt.txt"; prompt.write_text("do task\n", encoding="utf-8", newline="\n")
+            manifest = root / "manifest.jsonl"
+            row = {"sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M", "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(), "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)), "fixture_sha256": codex_automation.routing_eval._fixture_sha256({}), "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}}
+            manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
+                (root / name).write_bytes(name.encode())
+            args = mock.Mock(arm="M", live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", manifest=manifest, sequence=1, timeout=360)
+            materialize = mock.Mock()
+            process = mock.Mock()
+            with self.assertRaisesRegex(ValueError, "fixture SHA256 mismatch"):
+                codex_automation.execute_run_row(args, verify_cli=mock.Mock(), materialize=materialize, process_runner=process)
+            materialize.assert_not_called()
+            process.assert_not_called()
+
     def test_execute_run_row_preserves_task_failure_as_receipt_and_cleans_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
             workspace = root / "workspace"; workspace.mkdir()
             prompt = root / "prompt.txt"; prompt.write_text("do task\n", encoding="utf-8", newline="\n")
             manifest = root / "manifest.jsonl"
-            row = {"sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M", "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(), "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)), "fixture_sha256": "F" * 64, "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}}
+            row = {"sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M", "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(), "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)), "fixture_sha256": codex_automation.routing_eval._fixture_sha256({}), "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}}
             manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
             for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
                 (root / name).write_bytes(name.encode())

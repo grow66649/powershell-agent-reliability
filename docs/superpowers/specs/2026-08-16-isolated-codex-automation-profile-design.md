@@ -84,7 +84,7 @@ Do not copy OAuth state for unrelated connectors. Do not start or authenticate u
 
 Each manifest row receives:
 
-1. a fresh disposable workspace materialized from its frozen fixture;
+1. a fresh disposable workspace materialized from its frozen fixture, with the actual pre-run UTF-8 text tree re-hashed against the manifest fixture identity before any profile/model call;
 2. a fresh disposable `CODEX_HOME` cloned from the campaign base template;
 3. an arm patch for S or M followed by a prompt-input conformance probe;
 4. one fresh Desktop-bundled CLI process;
@@ -96,7 +96,7 @@ The exact CLI command is constructed as an argument array, never one nested comm
 
 The runner uses `--ephemeral --json`, the frozen workspace via `-C`, and the arm profile through `CODEX_HOME`. It must not use `--dangerously-bypass-approvals-and-sandbox`; the experiment preserves the frozen approval/sandbox policy from configuration.
 
-The existing 360-second campaign timeout remains the external kill boundary for both arms. The runner records task wall-clock around the Codex process itself. Timing is secondary paired evidence: valid slow rows are retained, S/M order is balanced, and unstable timing is reported as inconclusive rather than forced into an arm-selection claim.
+The existing 360-second campaign timeout remains the external kill boundary for both arms. Timeout handling terminates the Windows process tree, then uses a bounded settle period and a final parent-kill fallback rather than waiting indefinitely. The runner records task wall-clock around the Codex process itself. Timing is secondary paired evidence: valid slow rows are retained, S/M order is balanced, and unstable timing is reported as inconclusive rather than forced into an arm-selection claim.
 
 ## Evidence and cleanup
 
