@@ -39,6 +39,16 @@ def load_live_config(path: pathlib.Path) -> dict:
         return tomllib.load(handle)
 
 
+def ensure_external_evidence_root(evidence_root: pathlib.Path) -> pathlib.Path:
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    resolved = evidence_root.resolve(strict=False)
+    try:
+        resolved.relative_to(repo_root)
+    except ValueError:
+        return resolved
+    raise ValueError("raw automation evidence must stay outside the repository")
+
+
 def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
     if not workspace.is_dir():
         raise ValueError("workspace must exist before row execution")
@@ -334,8 +344,8 @@ def _error_text(value) -> str:
 def parse_cli_jsonl(path: pathlib.Path) -> dict:
     thread_id = None
     turn_status = "unknown"
-    commands = []
-    mcp_calls = []
+    commands_by_id = {}
+    mcp_calls_by_id = {}
     errors = []
     final_message = None
     tokens = {name: None for name in TOKEN_FIELDS}
@@ -354,16 +364,18 @@ def parse_cli_jsonl(path: pathlib.Path) -> dict:
             kind = event["type"]
             if kind == "thread.started":
                 thread_id = event.get("thread_id")
-            elif kind == "item.completed":
+            elif kind in {"item.started", "item.completed"}:
                 item = event.get("item") or {}
                 if not isinstance(item, dict):
                     raise ValueError(f"invalid CLI item at line {line_number}")
                 item_kind = item.get("type")
-                if item_kind == "command_execution":
-                    commands.append(dict(item))
-                elif item_kind == "mcp_tool_call":
-                    mcp_calls.append(dict(item))
-                elif item_kind == "agent_message" and isinstance(item.get("text"), str):
+                item_id = item.get("id")
+                if item_kind in {"command_execution", "mcp_tool_call"}:
+                    if not isinstance(item_id, str) or not item_id:
+                        raise ValueError(f"CLI tool/command item missing id at line {line_number}")
+                    target = commands_by_id if item_kind == "command_execution" else mcp_calls_by_id
+                    target[item_id] = dict(item)
+                elif kind == "item.completed" and item_kind == "agent_message" and isinstance(item.get("text"), str):
                     final_message = item["text"]
             elif kind == "turn.completed":
                 turn_status = "completed"
@@ -380,6 +392,8 @@ def parse_cli_jsonl(path: pathlib.Path) -> dict:
                 errors.append(_error_text(event.get("error")))
             elif kind == "error":
                 errors.append(_error_text(event.get("error") or event.get("message") or event))
+    commands = list(commands_by_id.values())
+    mcp_calls = list(mcp_calls_by_id.values())
     return {
         "thread_id": thread_id,
         "turn_status": turn_status,
@@ -387,12 +401,21 @@ def parse_cli_jsonl(path: pathlib.Path) -> dict:
         "commands": commands,
         "mcp_calls": mcp_calls,
         "native_command_count": len(commands),
+        "incomplete_native_command_count": sum(call.get("status") != "completed" for call in commands),
         "mcp_call_count": len(mcp_calls),
+        "incomplete_mcp_call_count": sum(call.get("status") != "completed" for call in mcp_calls),
         "reliability_mcp_call_count": sum(call.get("server") == "psr_reliability_native" for call in mcp_calls),
         "tokens": tokens,
         "final_message": final_message,
         "errors": [item for item in errors if item],
     }
+
+
+def validate_cli_terminal_state(process_result: dict, parsed: dict) -> None:
+    if process_result.get("timed_out"):
+        return
+    if parsed.get("turn_status") not in {"completed", "failed"}:
+        raise ValueError("CLI JSONL is missing a terminal turn event")
 
 
 def evaluate_manifest_row(manifest_row: dict, workspace: pathlib.Path) -> dict:
@@ -437,7 +460,9 @@ def normalized_execution_receipt(
         "thread_id": parsed.get("thread_id"),
         "turn_status": parsed.get("turn_status"),
         "native_command_count": parsed.get("native_command_count", 0),
+        "incomplete_native_command_count": parsed.get("incomplete_native_command_count", 0),
         "mcp_call_count": parsed.get("mcp_call_count", 0),
+        "incomplete_mcp_call_count": parsed.get("incomplete_mcp_call_count", 0),
         "reliability_mcp_call_count": parsed.get("reliability_mcp_call_count", 0),
         "skill_catalog": sorted({str(item.get("name", "")).strip() for item in skill_catalog if item.get("name")}),
         "post_condition_passed": post_condition.get("passed"),
@@ -590,6 +615,7 @@ def load_manifest_row(path: pathlib.Path, sequence: int) -> dict:
 
 
 def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=materialize_profile) -> dict:
+    args.evidence_root = ensure_external_evidence_root(args.evidence_root)
     cli_identity = verify_cli(args.codex, args.codex_version, args.codex_sha256)
     skill_hash = sha256_file(args.skill_path)
     mcp_hash = sha256_file(args.mcp_path)
@@ -634,6 +660,7 @@ def execute_run_row(
     process_runner=run_codex_process,
     json_parser=parse_cli_jsonl,
 ) -> dict:
+    args.evidence_root = ensure_external_evidence_root(args.evidence_root)
     cli_identity = verify_cli(args.codex, args.codex_version, args.codex_sha256)
     skill_hash = sha256_file(args.skill_path)
     mcp_hash = sha256_file(args.mcp_path)
@@ -670,6 +697,7 @@ def execute_run_row(
             output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout,
         )
         parsed = json_parser(output_dir / "stdout.jsonl")
+        validate_cli_terminal_state(process_result, parsed)
         post_condition = evaluate_manifest_row(row, workspace)
     finally:
         if profile is not None:

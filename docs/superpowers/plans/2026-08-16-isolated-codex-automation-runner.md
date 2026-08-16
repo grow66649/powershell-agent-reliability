@@ -80,7 +80,7 @@
 
 - [ ] **Step 1: Write failing fixtures/tests** for command execution items, MCP call items, turn completion/error, token usage, malformed/truncated JSONL, and missing token fields remaining `None` rather than synthesized.
 - [ ] **Step 2: Run focused tests** and verify RED.
-- [ ] **Step 3: Implement event adapter** that counts native commands, all MCP calls, Reliability MCP calls, and captures exact token fields when present.
+- [ ] **Step 3: Implement event adapter** that counts started-or-completed native command/MCP item identities without double-counting completion updates, preserves incomplete-attempt counts, requires a terminal turn event for non-timeout rows, and captures exact token fields when present.
 - [ ] **Step 4: Reuse `routing_eval._evaluate_workspace_post_condition` or the narrow existing helper** to read final workspace truth independently of final prose/process exit; before the model call, re-hash the prepared workspace UTF-8 text tree and require it to match the manifest fixture SHA so stale/reused workspaces fail closed.
 - [ ] **Step 5: Emit one normalized execution receipt** with process state, post-condition truth, prompt/workspace/profile/MCP/CLI hashes, observed Skill catalog, tool counts, token fields, and cleanup result.
 - [ ] **Step 6: Run focused tests**; expect PASS.
@@ -95,7 +95,7 @@
 **Interfaces:**
 - Produces CLI subcommands `profile-check` and `run-row` with typed arguments.
 
-- [ ] **Step 1: Write failing CLI parser tests** covering required manifest row, arm, live config, exact Codex path/hash/version, MCP path/hash, evidence root, and timeout.
+- [ ] **Step 1: Write failing CLI/parser boundary tests** covering required manifest row, arm, live config, exact Codex path/hash/version, MCP path/hash, evidence root, timeout, and rejection of raw evidence paths inside the repository.
 - [ ] **Step 2: Run focused tests** and verify RED.
 - [ ] **Step 3: Implement argparse entrypoint**; `profile-check` does no model call; `run-row` performs one complete isolated row.
 - [ ] **Step 4: Write thin PowerShell launcher** that resolves repo-relative Python script and forwards arguments without experiment logic or command-string nesting.

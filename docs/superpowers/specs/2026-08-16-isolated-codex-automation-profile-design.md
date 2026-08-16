@@ -100,7 +100,7 @@ The existing 360-second campaign timeout remains the external kill boundary for 
 
 ## Evidence and cleanup
 
-Raw CLI stdout JSONL, bounded stderr, final deterministic fixture state, and normalized routing records stay under the host-local evidence root. Secret-bearing `CODEX_HOME` contents are not evidence artifacts.
+Raw CLI stdout JSONL, bounded stderr, final deterministic fixture state, and normalized routing records stay under a host-local evidence root outside the repository; the runner rejects repo-internal evidence roots. Secret-bearing `CODEX_HOME` contents are not evidence artifacts.
 
 The normalized execution receipt records at least: case/trial/arm, sequence, public-main anchor, CLI version/hash, redacted profile fingerprint, MCP hash, prompt hash, workspace/fixture identity, process exit/timeout state, task wall-clock, post-condition truth, tool/Skill observations exposed by the rollout, token fields when present, and cleanup result.
 
@@ -115,7 +115,7 @@ Parity is established in layers before CLI automation can replace manual train e
 2. **Surface identity:** S exposes the Reliability Skill and M does not; both expose the same Reliability MCP tools; no unexpected MCP/plugin surface is present in the isolated profile.
 3. **Capability sessions:** separate, non-scored Desktop and CLI sessions may explicitly ask whether `powershell-reliability` is available/readable and may perform an explicit Reliability MCP canary. These sessions are deliberately separate from natural-task trials and cannot be reused as scored threads.
 4. **Behavioral canaries:** for each arm, at least one train-visible should-trigger case and one no-trigger/known-good case are run independently in Desktop and CLI with the same prompt and fixture. Deterministic post-condition truth and the relevant routing behavior must agree. A mismatch is investigated rather than averaged away.
-5. **Evidence compatibility:** automated JSONL contains enough bounded facts for the existing collector/scorer or an explicitly reviewed adapter to produce the same trial semantics as Desktop rollout evidence.
+5. **Evidence compatibility:** automated JSONL contains enough bounded facts for the existing collector/scorer or an explicitly reviewed adapter to produce the same trial semantics as Desktop rollout evidence. Started command/MCP attempts must not disappear merely because the row is interrupted; completed events update the same item identity, and non-timeout output must contain a terminal turn event.
 
 Until all applicable parity layers pass, CLI runs are screening/engineering evidence only. Even after parity, final product admission retains a bounded fresh Desktop confirmation sample.
 

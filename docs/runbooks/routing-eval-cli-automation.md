@@ -10,7 +10,7 @@ The runner uses one fresh disposable `CODEX_HOME`, workspace, output namespace, 
 - Codex Desktop installed and the exact bundled `codex.exe` path identified.
 - The live Codex configuration already working with the intended model/provider.
 - The exact Reliability MCP executable and companion Skill file available locally.
-- A host-local evidence directory outside the repository.
+- A host-local evidence directory outside the repository. The runner rejects a repository-internal evidence root.
 
 Keep provider tokens, authorization headers, raw JSONL, and temporary profiles outside the repository.
 
@@ -75,6 +75,6 @@ Capability canaries may directly ask whether the Skill is available and may expl
 
 ## Evidence and cleanup
 
-`--ephemeral` means the runner must capture stdout JSONL directly; it must not wait for a session rollout file. Missing token fields remain `null` and are not synthesized. Each row also records `task_wall_clock_ms` around the Codex process. Compare time only across matched S/M rows with balanced order; keep valid slow rows and report unstable timing as inconclusive rather than forcing a winner.
+`--ephemeral` means the runner must capture stdout JSONL directly; it must not wait for a session rollout file. Command/MCP attempts are counted from started-or-completed item identities so an interrupted call is not silently lost, while completion updates are deduplicated. A non-timeout row without a terminal `turn.completed`/`turn.failed` event fails closed. Missing token fields remain `null` and are not synthesized. Each row also records `task_wall_clock_ms` around the Codex process. Compare time only across matched S/M rows with balanced order; keep valid slow rows and report unstable timing as inconclusive rather than forcing a winner.
 
 A cleanup failure blocks the campaign. Do not weaken ACLs, sandboxing, approval policy, PowerShell profiles, or global environment settings to force a run through.

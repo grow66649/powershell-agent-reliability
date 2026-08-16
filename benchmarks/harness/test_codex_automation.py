@@ -265,6 +265,22 @@ class CliJsonAdapterTests(unittest.TestCase):
         self.assertIsNone(parsed["tokens"]["total_tokens"])
         self.assertEqual(parsed["final_message"], "READY")
 
+    def test_parse_cli_jsonl_counts_started_attempts_and_deduplicates_completion(self):
+        rows = [
+            {"type": "thread.started", "thread_id": "thread-1"},
+            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "slow.exe", "status": "in_progress"}},
+            {"type": "item.started", "item": {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "diagnose_failure", "arguments": {}, "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "diagnose_failure", "arguments": {}, "status": "completed"}},
+            {"type": "turn.failed", "error": {"message": "stopped"}},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parsed = codex_automation.parse_cli_jsonl(self._write_jsonl(temp_dir, rows))
+        self.assertEqual(parsed["native_command_count"], 1)
+        self.assertEqual(parsed["incomplete_native_command_count"], 1)
+        self.assertEqual(parsed["mcp_call_count"], 1)
+        self.assertEqual(parsed["incomplete_mcp_call_count"], 0)
+        self.assertEqual(parsed["reliability_mcp_call_count"], 1)
+
     def test_parse_cli_jsonl_keeps_missing_token_fields_none_and_rejects_malformed_line(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -277,6 +293,18 @@ class CliJsonAdapterTests(unittest.TestCase):
             bad.write_text('{"type":"turn.started"}\n{"type":', encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "line 2"):
                 codex_automation.parse_cli_jsonl(bad)
+
+    def test_validate_cli_terminal_state_rejects_clean_exit_without_terminal_event(self):
+        with self.assertRaisesRegex(ValueError, "terminal turn event"):
+            codex_automation.validate_cli_terminal_state(
+                {"timed_out": False, "exit_code": 0}, {"turn_status": "unknown"}
+            )
+        codex_automation.validate_cli_terminal_state(
+            {"timed_out": True, "exit_code": 1}, {"turn_status": "unknown"}
+        )
+        codex_automation.validate_cli_terminal_state(
+            {"timed_out": False, "exit_code": 1}, {"turn_status": "failed"}
+        )
 
     def test_evaluate_manifest_row_uses_workspace_truth_not_process_exit(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -345,6 +373,16 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.command, "run-row")
         self.assertEqual(args.sequence, 7)
         self.assertEqual(args.timeout, 360)
+
+
+class EvidenceRootBoundaryTests(unittest.TestCase):
+    def test_evidence_root_must_stay_outside_repository(self):
+        repo = pathlib.Path(__file__).resolve().parents[2]
+        with self.assertRaisesRegex(ValueError, "outside the repository"):
+            codex_automation.ensure_external_evidence_root(repo / "evidence")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            external = pathlib.Path(temp_dir) / "evidence"
+            self.assertEqual(codex_automation.ensure_external_evidence_root(external), external.resolve())
 
 
 class MaterializeProfileTests(unittest.TestCase):
