@@ -27,6 +27,7 @@ pwsh.exe -NoProfile -File .\scripts\run-routing-automation.ps1 profile-check `
   --codex-version 0.148.0-alpha.9 `
   --codex-sha256 <sha256> `
   --model gpt-5.6-luna `
+  --public-main-sha <exact-public-main-sha> `
   --skill-path <powershell-reliability-SKILL.md> `
   --skill-sha256 <sha256> `
   --mcp-path <powershell-agent-reliability.exe> `
@@ -35,7 +36,7 @@ pwsh.exe -NoProfile -File .\scripts\run-routing-automation.ps1 profile-check `
   --identity-lock <campaign-root>\campaign-identity.json
 ```
 
-Run the same command with `--arm M`. S must expose only `powershell-reliability`; M must expose no Skills. Both arms must expose exactly the same `psr_reliability_native` MCP command. The shared lock binds the actual CLI path/version/hash, Skill and MCP hashes, live-config hash, model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and local `main` anchor; secret provider values are never stored in the lock.
+Run the same command with `--arm M`. S must expose only `powershell-reliability`; M must expose no Skills. Both arms must expose exactly the same `psr_reliability_native` MCP command. The shared lock binds the actual CLI path/version/hash, Skill and MCP hashes, live-config hash, model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and the explicitly supplied public-main SHA; secret provider values are never stored in the lock. The runner does not require a local `main` ref, so shallow PR CI and detached checkouts can still exercise the automation tests.
 
 A failed catalog, hash, ACL, config, or cleanup check blocks the run. Do not repair a profile in place and continue using it.
 
@@ -54,6 +55,7 @@ pwsh.exe -NoProfile -File .\scripts\run-routing-automation.ps1 run-row `
   --codex-version 0.148.0-alpha.9 `
   --codex-sha256 <sha256> `
   --model gpt-5.6-luna `
+  --public-main-sha <exact-public-main-sha> `
   --skill-path <powershell-reliability-SKILL.md> `
   --skill-sha256 <sha256> `
   --mcp-path <powershell-agent-reliability.exe> `

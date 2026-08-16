@@ -58,7 +58,9 @@ def _git_rev_parse(ref: str, runner=subprocess.run) -> str:
     return value.lower()
 
 
-def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skill_sha256: str, mcp_path: pathlib.Path, mcp_sha256: str, profile_meta: dict, model: str | None = None) -> dict:
+def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skill_sha256: str, mcp_path: pathlib.Path, mcp_sha256: str, profile_meta: dict, model: str | None = None, public_main_sha: str | None = None) -> dict:
+    if not isinstance(public_main_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", public_main_sha):
+        raise ValueError("public main SHA must be an exact 40-character Git commit id")
     return {
         "schema_version": 1,
         "cli_path": str(pathlib.Path(cli_identity["path"]).resolve(strict=False)),
@@ -77,7 +79,7 @@ def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skil
         "approval_policy": profile_meta.get("approval_policy"),
         "sandbox_mode": profile_meta.get("sandbox_mode"),
         "harness_git_head": _git_rev_parse("HEAD"),
-        "public_main_sha": _git_rev_parse("main"),
+        "public_main_sha": public_main_sha.lower(),
     }
 
 
@@ -642,6 +644,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--evidence-root", type=pathlib.Path, required=True)
     parser.add_argument("--identity-lock", type=pathlib.Path, required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--public-main-sha", required=True)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -791,7 +794,7 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
         profile, meta, skills, mcp_catalog = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
-        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, meta, model=args.model)
+        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, meta, model=args.model, public_main_sha=args.public_main_sha)
         identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=True)
         result = {
             "schema_version": 1,
@@ -861,7 +864,7 @@ def execute_run_row(
         profile, profile_meta, skills, _ = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
-        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, profile_meta, model=args.model)
+        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, profile_meta, model=args.model, public_main_sha=args.public_main_sha)
         identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=False)
         output_dir.mkdir(parents=True)
         process_result = process_runner(

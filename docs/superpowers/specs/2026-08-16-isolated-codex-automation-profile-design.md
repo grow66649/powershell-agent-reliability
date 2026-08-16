@@ -59,7 +59,7 @@ The provider table may contain credentials or credential-bearing headers. Those 
 
 The secret-bearing base template and per-row profile directories must inherit or receive an ACL restricted to the current Windows user. Cleanup of the secret-bearing profile is an explicit post-condition. A cleanup failure blocks the campaign until the leftover profile is removed safely; the runner must not weaken ACLs to force cleanup.
 
-A redacted profile manifest is preserved separately. It records non-secret runtime identity, source config hash, generated profile hash/fingerprint, Skill surface, MCP executable hash, and cleanup result. Before formal rows, `profile-check` creates or verifies one shared non-secret campaign identity lock binding the actual bundled CLI path/version/hash, Skill/MCP hashes, live-config hash, effective model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and local public-main anchor. Every S/M row must match the same lock; provider credentials/headers are never stored in it.
+A redacted profile manifest is preserved separately. It records non-secret runtime identity, source config hash, generated profile hash/fingerprint, Skill surface, MCP executable hash, and cleanup result. Before formal rows, `profile-check` creates or verifies one shared non-secret campaign identity lock binding the actual bundled CLI path/version/hash, Skill/MCP hashes, live-config hash, effective model/provider/reasoning/approval/sandbox identity, harness Git HEAD, and an explicitly supplied exact public-main SHA. The runner must not depend on a local `main` ref, because shallow PR CI and detached checkouts may not have one. Every S/M row must match the same lock; provider credentials/headers are never stored in it.
 
 ## Skill isolation
 

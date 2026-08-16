@@ -400,7 +400,7 @@ class CliParserTests(unittest.TestCase):
             "--codex-sha256", "A" * 64, "--skill-path", PSR_SKILL,
             "--skill-sha256", "B" * 64, "--mcp-path", PSR_MCP,
             "--mcp-sha256", "C" * 64, "--evidence-root", "C:/evidence",
-            "--identity-lock", "C:/evidence/campaign-identity.json", "--model", "gpt-5.6-luna",
+            "--identity-lock", "C:/evidence/campaign-identity.json", "--model", "gpt-5.6-luna", "--public-main-sha", "0" * 40,
         ]
 
     def test_profile_check_parser_requires_runtime_identity_and_arm(self):
@@ -410,6 +410,7 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.codex_version, "0.148.0-alpha.9")
         self.assertEqual(args.identity_lock, pathlib.Path("C:/evidence/campaign-identity.json"))
         self.assertEqual(args.model, "gpt-5.6-luna")
+        self.assertEqual(args.public_main_sha, "0" * 40)
 
     def test_run_row_parser_requires_manifest_sequence_and_timeout(self):
         args = codex_automation.parse_args(["run-row", *self._common(), "--manifest", "C:/campaign/manifest.jsonl", "--sequence", "7", "--timeout", "360"])
@@ -472,7 +473,7 @@ class CommandWorkflowTests(unittest.TestCase):
                 (root / name).write_bytes(name.encode())
             profile = root / "secret-profile"; profile.mkdir()
             materialize = mock.Mock(return_value=(profile, {"live_config_sha256": "1" * 64, "profile_fingerprint": "2" * 64, "provider": "codex_local_access", "model": "gpt-5.6-luna", "effort": "max"}, [{"name": "powershell-reliability", "path": PSR_SKILL}], [{"name": "psr_reliability_native", "enabled": True}]))
-            args = mock.Mock(arm="S", model="gpt-5.6-luna", live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json")
+            args = mock.Mock(arm="S", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json")
             result = codex_automation.execute_profile_check(args, verify_cli=mock.Mock(return_value={"version":"0.148.0-alpha.9","sha256":args.codex_sha256,"path":str(args.codex)}), materialize=materialize)
             self.assertEqual(result["status"], "PASS")
             self.assertFalse(profile.exists())
@@ -513,6 +514,21 @@ class ManifestTopologyTests(unittest.TestCase):
 
 
 class CampaignIdentityLockTests(unittest.TestCase):
+    def test_campaign_identity_uses_explicit_public_main_without_local_main_ref(self):
+        cli = {"path": "C:/Codex/codex.exe", "version": "0.148.0-alpha.9", "sha256": "A" * 64}
+        meta = {"live_config_sha256": "B" * 64, "provider": "codex_local_access", "model": None, "effort": "max", "approval_policy": "never", "sandbox_mode": "danger-full-access"}
+        def git_ref(ref):
+            if ref == "HEAD":
+                return "1" * 40
+            raise RuntimeError("main ref unavailable")
+        with mock.patch.object(codex_automation, "_git_rev_parse", side_effect=git_ref):
+            payload = codex_automation.campaign_identity_payload(
+                cli, pathlib.Path("C:/skill.md"), "C" * 64, pathlib.Path("C:/mcp.exe"), "D" * 64, meta,
+                model="gpt-5.6-luna", public_main_sha="2" * 40,
+            )
+        self.assertEqual(payload["harness_git_head"], "1" * 40)
+        self.assertEqual(payload["public_main_sha"], "2" * 40)
+
     def test_profile_check_creates_lock_and_rejects_cli_identity_drift(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -536,7 +552,7 @@ class CampaignIdentityLockTests(unittest.TestCase):
                 return profile, meta, [{"name": "powershell-reliability", "path": PSR_SKILL}], [{"name": "psr_reliability_native", "enabled": True}]
 
             args = mock.Mock(
-                arm="S", model="gpt-5.6-luna", live_config=root/"config.toml", codex=root/"codex.exe",
+                arm="S", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe",
                 codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"),
                 skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"),
                 mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"),
@@ -574,7 +590,7 @@ class RunRowWorkflowTests(unittest.TestCase):
             manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
             for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
                 (root / name).write_bytes(name.encode())
-            args = mock.Mock(arm="M", model="gpt-5.6-luna", live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json", manifest=manifest, sequence=1, timeout=360)
+            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json", manifest=manifest, sequence=1, timeout=360)
             materialize = mock.Mock()
             process = mock.Mock()
             with self.assertRaisesRegex(ValueError, "fixture SHA256 mismatch"):
@@ -597,9 +613,9 @@ class RunRowWorkflowTests(unittest.TestCase):
             materialize = mock.Mock(return_value=(profile, {"live_config_sha256":live_hash,"profile_fingerprint":"2"*64,"provider":"codex_local_access","model":"gpt-5.6-luna","effort":"max"}, [], [{"name":"psr_reliability_native","enabled":True}]))
             process = mock.Mock(return_value={"exit_code":0,"timed_out":False,"termination_reason":"process_exit"})
             parsed = {"thread_id":"t","turn_status":"completed","native_command_count":1,"mcp_call_count":0,"reliability_mcp_call_count":0,"tokens":{name:None for name in codex_automation.TOKEN_FIELDS},"final_message":"done","errors":[]}
-            args = mock.Mock(arm="M", model="gpt-5.6-luna", live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json", manifest=manifest, sequence=1, timeout=360)
+            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json", manifest=manifest, sequence=1, timeout=360)
             cli_identity = {"version":"0.148.0-alpha.9","sha256":args.codex_sha256,"path":str(args.codex)}
-            identity = codex_automation.campaign_identity_payload(cli_identity, args.skill_path, args.skill_sha256, args.mcp_path, args.mcp_sha256, materialize.return_value[1])
+            identity = codex_automation.campaign_identity_payload(cli_identity, args.skill_path, args.skill_sha256, args.mcp_path, args.mcp_sha256, materialize.return_value[1], model=args.model, public_main_sha=args.public_main_sha)
             codex_automation.verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=True)
             receipt = codex_automation.execute_run_row(args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize, process_runner=process, json_parser=mock.Mock(return_value=parsed))
             self.assertFalse(receipt["post_condition_passed"])
@@ -622,10 +638,10 @@ class RunRowWorkflowTests(unittest.TestCase):
             materialize = mock.Mock(return_value=(profile, meta, [], [{"name":"psr_reliability_native","enabled":True}]))
             cli_identity = {"version":"0.148.0-alpha.9","sha256":codex_automation.sha256_file(root/"codex.exe"),"path":str(root/"codex.exe")}
             identity_lock = root / "campaign-identity.json"
-            drifted = codex_automation.campaign_identity_payload(cli_identity, root/"skill.md", codex_automation.sha256_file(root/"skill.md"), root/"mcp.exe", codex_automation.sha256_file(root/"mcp.exe"), meta)
+            drifted = codex_automation.campaign_identity_payload(cli_identity, root/"skill.md", codex_automation.sha256_file(root/"skill.md"), root/"mcp.exe", codex_automation.sha256_file(root/"mcp.exe"), meta, model="gpt-5.6-luna", public_main_sha="0"*40)
             drifted["model"] = "different-model"
             codex_automation.verify_or_create_campaign_identity_lock(identity_lock, drifted, allow_create=True)
-            args = mock.Mock(arm="M", model="gpt-5.6-luna", live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=cli_identity["sha256"], skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=identity_lock, manifest=manifest, sequence=1, timeout=360)
+            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=cli_identity["sha256"], skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=identity_lock, manifest=manifest, sequence=1, timeout=360)
             process = mock.Mock()
             with self.assertRaisesRegex(ValueError, "campaign identity"):
                 codex_automation.execute_run_row(args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize, process_runner=process)
@@ -653,7 +669,7 @@ class RunRowWorkflowTests(unittest.TestCase):
             for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
                 (root / name).write_bytes(name.encode())
             args = mock.Mock(
-                arm="M", model="gpt-5.6-luna", live_config=root/"config.toml", codex=root/"codex.exe",
+                arm="M", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe",
                 codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"),
                 skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"),
                 mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"),
