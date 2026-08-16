@@ -510,9 +510,13 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
                     summary["completed_event_index"] = event_count
                     summary["terminal_status"] = item.get("status")
                 if item_kind == "command_execution":
-                    for field in ("exit_code",):
-                        if field in item:
-                            summary[field] = item[field]
+                    for field in ("command", "cwd", "workdir", "exit_code"):
+                        value = item.get(field)
+                        if field == "exit_code":
+                            if field in item:
+                                summary[field] = value
+                        elif isinstance(value, str) and value:
+                            summary[field] = value
                 else:
                     for field in ("server", "tool"):
                         if field in item:
@@ -555,6 +559,53 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
     }
 
 
+def _known_path_sha256(value: pathlib.Path | str) -> str:
+    normalized = str(pathlib.PureWindowsPath(str(value))).replace("/", "\\").rstrip("\\").casefold()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest().upper()
+
+
+def _text_mentions_windows_path(text: str, path: pathlib.Path | str) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
+    normalized_text = text.replace("/", "\\").casefold()
+    normalized_path = str(pathlib.PureWindowsPath(str(path))).replace("/", "\\").rstrip("\\").casefold()
+    return bool(normalized_path) and normalized_path in normalized_text
+
+
+def detect_campaign_contamination(
+    parsed: dict,
+    manifest_rows: list[dict],
+    current_row: dict,
+    coordinator_root: pathlib.Path,
+) -> list[dict]:
+    current_workspace = str(current_row.get("workspace") or "")
+    current_key = _windows_path_key(current_workspace) if current_workspace else ""
+    other_paths = []
+    for row in manifest_rows:
+        value = row.get("workspace")
+        if not isinstance(value, str) or not value:
+            continue
+        if _windows_path_key(value) != current_key:
+            other_paths.append(value)
+    evidence = []
+    seen = set()
+    for command in parsed.get("commands") or []:
+        command_id = command.get("id")
+        fields = [command.get("command"), command.get("cwd"), command.get("workdir")]
+        targets = [("coordinator_access", str(coordinator_root))]
+        targets.extend(("other_row_workspace_access", value) for value in other_paths)
+        for kind, target in targets:
+            if not any(_text_mentions_windows_path(value, target) for value in fields if isinstance(value, str)):
+                continue
+            path_sha256 = _known_path_sha256(target)
+            identity = (kind, command_id, path_sha256)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            evidence.append({"kind": kind, "command_id": command_id, "path_sha256": path_sha256})
+    return evidence
+
+
 def validate_cli_terminal_state(process_result: dict, parsed: dict) -> None:
     if process_result.get("timed_out"):
         return
@@ -574,6 +625,19 @@ def evaluate_manifest_row(manifest_row: dict, workspace: pathlib.Path) -> dict:
     raise ValueError("CLI automation supports only workspace_state/none post-conditions")
 
 
+def _receipt_native_commands(commands) -> list[dict]:
+    allowed = (
+        "id", "type", "started_event_index", "completed_event_index",
+        "terminal_status", "exit_code",
+    )
+    result = []
+    for command in commands or []:
+        if not isinstance(command, dict):
+            continue
+        result.append({key: command[key] for key in allowed if key in command})
+    return result
+
+
 def normalized_execution_receipt(
     manifest_row: dict,
     process_result: dict,
@@ -583,6 +647,7 @@ def normalized_execution_receipt(
     post_condition: dict,
     profile_cleanup_ok: bool,
     workspace_cleanup_ok: bool,
+    contamination_evidence=(),
 ) -> dict:
     receipt = {
         "schema_version": 1,
@@ -620,11 +685,13 @@ def normalized_execution_receipt(
         "incomplete_mcp_call_count": parsed.get("incomplete_mcp_call_count", 0),
         "reliability_mcp_call_count": parsed.get("reliability_mcp_call_count", 0),
         "truncated_jsonl_tail": bool(parsed.get("truncated_jsonl_tail")),
-        "native_commands": parsed.get("commands", []),
+        "native_commands": _receipt_native_commands(parsed.get("commands")),
         "mcp_calls": parsed.get("mcp_calls", []),
         "skill_catalog": sorted({str(item.get("name", "")).strip() for item in skill_catalog if item.get("name")}),
         "post_condition_passed": post_condition.get("passed"),
         "post_condition_source": post_condition.get("source"),
+        "protocol_contamination": bool(contamination_evidence),
+        "contamination_evidence": list(contamination_evidence),
         "profile_cleanup_ok": bool(profile_cleanup_ok),
         "workspace_cleanup_ok": bool(workspace_cleanup_ok),
         "cleanup_ok": bool(profile_cleanup_ok and workspace_cleanup_ok),
@@ -958,6 +1025,10 @@ def execute_run_row(
         )
         validate_cli_terminal_state(process_result, parsed)
         post_condition = evaluate_manifest_row(row, workspace)
+        manifest_rows = routing_eval.trigger_eval.load_jsonl(args.manifest)
+        contamination_evidence = detect_campaign_contamination(
+            parsed, manifest_rows, row, args.manifest.parent
+        )
     finally:
         if profile is not None:
             try:
@@ -990,7 +1061,7 @@ def execute_run_row(
     })
     receipt = normalized_execution_receipt(
         row, process_result, parsed, profile_meta, skills, post_condition,
-        profile_cleanup_ok, workspace_cleanup_ok,
+        profile_cleanup_ok, workspace_cleanup_ok, contamination_evidence,
     )
     (output_dir / "receipt.json").write_text(
         json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

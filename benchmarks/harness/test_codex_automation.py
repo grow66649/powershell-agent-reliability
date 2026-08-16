@@ -251,8 +251,8 @@ class CliJsonAdapterTests(unittest.TestCase):
     def test_parse_cli_jsonl_counts_started_command_mcp_and_exact_usage(self):
         rows = [
             {"type": "thread.started", "thread_id": "thread-1"},
-            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "cmd.exe /c exit 0", "exit_code": None, "status": "in_progress"}},
-            {"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "cmd.exe /c exit 0", "exit_code": 0, "status": "completed"}},
+            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "Get-ChildItem D:\\coord", "cwd": "D:\\runtime\\abc", "exit_code": None, "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "Get-ChildItem D:\\coord", "cwd": "D:\\runtime\\abc", "exit_code": 0, "status": "completed"}},
             {"type": "item.started", "item": {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "inspect_environment", "arguments": {}, "status": "in_progress"}},
             {"type": "item.completed", "item": {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "inspect_environment", "arguments": {}, "status": "completed", "error": None}},
             {"type": "item.completed", "item": {"id": "a1", "type": "agent_message", "text": "READY"}},
@@ -264,6 +264,8 @@ class CliJsonAdapterTests(unittest.TestCase):
         self.assertEqual(parsed["native_command_count"], 1)
         self.assertEqual(parsed["mcp_call_count"], 1)
         self.assertEqual(parsed["reliability_mcp_call_count"], 1)
+        self.assertEqual(parsed["commands"][0]["command"], "Get-ChildItem D:\\coord")
+        self.assertEqual(parsed["commands"][0]["cwd"], "D:\\runtime\\abc")
         self.assertEqual(parsed["tokens"]["input_tokens"], 100)
         self.assertIsNone(parsed["tokens"]["total_tokens"])
         self.assertEqual(parsed["final_message"], "READY")
@@ -376,7 +378,7 @@ class CliJsonAdapterTests(unittest.TestCase):
     def test_normalized_receipt_combines_process_catalog_tool_tokens_and_post_condition(self):
         manifest = {"case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "S", "sequence": 1, "prompt_sha256": "A" * 64, "workspace_sha256": "B" * 64, "fixture_sha256": "C" * 64}
         process = {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 321}
-        parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 2, "mcp_call_count": 1, "reliability_mcp_call_count": 1, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+        parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 2, "mcp_call_count": 1, "reliability_mcp_call_count": 1, "commands": [{"id": "c1", "type": "command_execution", "command": "Get-ChildItem D:\\private", "cwd": "D:\\private", "exit_code": 0, "terminal_status": "completed"}], "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
         parsed["tokens"]["input_tokens"] = 12
         profile = {"cli_version": "0.148.0-alpha.9", "cli_sha256": "D" * 64, "profile_fingerprint": "E" * 64, "mcp_sha256": "F" * 64}
         receipt = codex_automation.normalized_execution_receipt(manifest, process, parsed, profile, [{"name": "powershell-reliability", "path": PSR_SKILL}], {"passed": True, "source": "evaluator_workspace"}, True, True)
@@ -385,9 +387,36 @@ class CliJsonAdapterTests(unittest.TestCase):
         self.assertEqual(receipt["input_tokens"], 12)
         self.assertEqual(receipt["task_wall_clock_ms"], 321)
         self.assertEqual(receipt["skill_catalog"], ["powershell-reliability"])
+        self.assertEqual(receipt["native_commands"], [{"id": "c1", "type": "command_execution", "exit_code": 0, "terminal_status": "completed"}])
+        self.assertNotIn("D:\\private", json.dumps(receipt))
         self.assertTrue(receipt["profile_cleanup_ok"])
         self.assertTrue(receipt["workspace_cleanup_ok"])
         self.assertTrue(receipt["cleanup_ok"])
+
+
+class ContaminationDetectionTests(unittest.TestCase):
+    def test_detect_campaign_contamination_reports_only_known_coordinator_or_other_row_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            current_workspace = root / "runtime" / ("a" * 32) / ("b" * 32)
+            other_workspace = root / "runtime" / ("a" * 32) / ("c" * 32)
+            parsed = {
+                "commands": [
+                    {"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{coordinator}'"},
+                    {"id": "c2", "type": "command_execution", "cwd": str(current_workspace), "command": "Get-ChildItem ."},
+                    {"id": "c3", "type": "command_execution", "workdir": str(other_workspace), "command": "Get-ChildItem ."},
+                ]
+            }
+            current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": str(current_workspace)}
+            other = {"case_id": "X1", "trial_id": "T01", "arm": "M", "workspace": str(other_workspace)}
+            evidence = codex_automation.detect_campaign_contamination(parsed, [current, other], current, coordinator)
+        self.assertEqual([item["kind"] for item in evidence], ["coordinator_access", "other_row_workspace_access"])
+        self.assertEqual([item["command_id"] for item in evidence], ["c1", "c3"])
+        self.assertTrue(all(set(item) == {"kind", "command_id", "path_sha256"} for item in evidence))
+        self.assertTrue(all(len(item["path_sha256"]) == 64 for item in evidence))
+        self.assertNotIn(str(coordinator), json.dumps(evidence))
+        self.assertNotIn(str(other_workspace), json.dumps(evidence))
 
 
 class RuntimeSurfaceProbeTests(unittest.TestCase):
@@ -825,6 +854,25 @@ class RunRowWorkflowTests(unittest.TestCase):
             )
             self.assertTrue(receipt["timed_out"])
             self.assertTrue(receipt["post_condition_passed"])
+            self.assertTrue(receipt["cleanup_ok"])
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_marks_bounded_protocol_contamination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(root)
+            coordinator = args.manifest.parent
+            process = mock.Mock(return_value={"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1})
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 1, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [{"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{coordinator}'", "exit_code": 0}], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            receipt = codex_automation.execute_run_row(
+                args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                process_runner=process, json_parser=mock.Mock(return_value=parsed),
+            )
+            self.assertTrue(receipt["protocol_contamination"])
+            self.assertEqual([item["kind"] for item in receipt["contamination_evidence"]], ["coordinator_access"])
+            evidence_text = json.dumps(receipt["contamination_evidence"])
+            self.assertNotIn(str(coordinator), evidence_text)
             self.assertTrue(receipt["cleanup_ok"])
             self.assertFalse(profile.exists())
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
