@@ -604,6 +604,14 @@ class RunRowWorkflowTests(unittest.TestCase):
             expected = codex_automation.routing_eval._fixture_sha256({"a.txt": "A\n", "nested/b.ps1": "Write-Output B\n"})
             self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), expected)
 
+    def test_workspace_fixture_sha256_preserves_crlf_fixture_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            content = "@echo off\r\nexit /b 0\r\n"
+            (workspace / "helper.cmd").write_bytes(content.encode("utf-8"))
+            expected = codex_automation.routing_eval._fixture_sha256({"helper.cmd": content})
+            self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), expected)
+
     def test_execute_run_row_rejects_mutated_fixture_before_profile_or_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)

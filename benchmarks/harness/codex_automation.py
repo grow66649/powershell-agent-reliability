@@ -127,7 +127,7 @@ def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
             continue
         relative = path.relative_to(workspace).as_posix()
         try:
-            files[relative] = path.read_text(encoding="utf-8")
+            files[relative] = path.read_text(encoding="utf-8", newline="")
         except UnicodeDecodeError as exc:
             raise ValueError(f"workspace fixture must contain UTF-8 text files only: {relative}") from exc
     return routing_eval._fixture_sha256(files)
