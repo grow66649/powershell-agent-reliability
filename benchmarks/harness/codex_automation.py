@@ -581,7 +581,8 @@ def normalized_execution_receipt(
     profile_meta: dict,
     skill_catalog: list[dict],
     post_condition: dict,
-    cleanup_ok: bool,
+    profile_cleanup_ok: bool,
+    workspace_cleanup_ok: bool,
 ) -> dict:
     receipt = {
         "schema_version": 1,
@@ -624,7 +625,9 @@ def normalized_execution_receipt(
         "skill_catalog": sorted({str(item.get("name", "")).strip() for item in skill_catalog if item.get("name")}),
         "post_condition_passed": post_condition.get("passed"),
         "post_condition_source": post_condition.get("source"),
-        "cleanup_ok": bool(cleanup_ok),
+        "profile_cleanup_ok": bool(profile_cleanup_ok),
+        "workspace_cleanup_ok": bool(workspace_cleanup_ok),
+        "cleanup_ok": bool(profile_cleanup_ok and workspace_cleanup_ok),
     }
     for name in TOKEN_FIELDS:
         receipt[name] = (parsed.get("tokens") or {}).get(name)
@@ -920,35 +923,58 @@ def execute_run_row(
     if actual_prompt_hash != row.get("prompt_sha256"):
         raise ValueError("prompt hash mismatch")
     workspace = pathlib.Path(row["workspace"])
-    if routing_eval.workspace_identity(str(workspace)) != row.get("workspace_sha256"):
-        raise ValueError("workspace identity mismatch")
-    actual_fixture_hash = workspace_fixture_sha256(workspace)
-    if actual_fixture_hash != row.get("fixture_sha256"):
-        raise ValueError("workspace fixture SHA256 mismatch")
     ensure_evidence_outside_workspace(args.evidence_root, workspace)
     output_dir = args.evidence_root / f"{args.sequence:04d}-{row['case_key']}-{args.arm}"
     if output_dir.exists():
         raise FileExistsError(f"row evidence already exists: {output_dir}")
+
     profile = None
-    cleanup_ok = False
+    workspace_materialized = False
+    profile_cleanup_ok = False
+    workspace_cleanup_ok = False
+    cleanup_errors = []
     try:
+        workspace = materialize_row_workspace(row)
+        workspace_materialized = True
         profile, profile_meta, skills, _ = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
-        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, profile_meta, model=args.model, public_main_sha=args.public_main_sha)
-        identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=False)
+        identity = campaign_identity_payload(
+            cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash,
+            profile_meta, model=args.model, public_main_sha=args.public_main_sha,
+        )
+        identity_sha = verify_or_create_campaign_identity_lock(
+            args.identity_lock, identity, allow_create=False
+        )
         output_dir.mkdir(parents=True)
         process_result = process_runner(
             args.codex, workspace, profile, prompt_bytes,
-            output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout, model=args.model,
+            output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout,
+            model=args.model,
         )
-        parsed = json_parser(output_dir / "stdout.jsonl", allow_truncated_tail=bool(process_result.get("timed_out")))
+        parsed = json_parser(
+            output_dir / "stdout.jsonl",
+            allow_truncated_tail=bool(process_result.get("timed_out")),
+        )
         validate_cli_terminal_state(process_result, parsed)
         post_condition = evaluate_manifest_row(row, workspace)
     finally:
         if profile is not None:
-            remove_profile(profile)
-            cleanup_ok = not profile.exists()
+            try:
+                remove_profile(profile)
+                profile_cleanup_ok = not profile.exists()
+            except Exception as exc:
+                cleanup_errors.append(("profile", exc))
+        if workspace_materialized or workspace.exists():
+            try:
+                remove_runtime_workspace(workspace)
+                workspace_cleanup_ok = not workspace.exists()
+            except Exception as exc:
+                cleanup_errors.append(("workspace", exc))
+        if cleanup_errors:
+            kinds = ", ".join(kind for kind, _ in cleanup_errors)
+            raise RuntimeError(f"row cleanup failed: {kinds}") from cleanup_errors[0][1]
+
     if sha256_file(args.live_config) != profile_meta["live_config_sha256"]:
         raise RuntimeError("live Codex config changed during automated row")
     profile_meta = dict(profile_meta)
@@ -962,8 +988,13 @@ def execute_run_row(
         "harness_git_head": identity["harness_git_head"],
         "public_main_sha": identity["public_main_sha"],
     })
-    receipt = normalized_execution_receipt(row, process_result, parsed, profile_meta, skills, post_condition, cleanup_ok)
-    (output_dir / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    receipt = normalized_execution_receipt(
+        row, process_result, parsed, profile_meta, skills, post_condition,
+        profile_cleanup_ok, workspace_cleanup_ok,
+    )
+    (output_dir / "receipt.json").write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     return receipt
 
 
