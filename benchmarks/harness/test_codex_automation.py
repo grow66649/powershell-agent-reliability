@@ -500,36 +500,52 @@ class CommandWorkflowTests(unittest.TestCase):
 
 
 class ManifestTopologyTests(unittest.TestCase):
-    def test_validate_manifest_row_paths_requires_campaign_prompt_and_workspace_layout(self):
+    def test_validate_manifest_row_paths_accepts_opaque_runtime_layout(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            manifest = root / "manifest.jsonl"
-            row = {"case_key": "X1-T01", "arm": "M", "prompt_path": str(root/"prompts"/"X1-T01.txt"), "workspace": str(root/"workspaces"/"M"/"X1-T01")}
-            codex_automation.validate_manifest_row_paths(manifest, row)
-            bad = dict(row); bad["workspace"] = str(root/".."/"elsewhere")
-            with self.assertRaisesRegex(ValueError, "workspace path"):
-                codex_automation.validate_manifest_row_paths(manifest, bad)
-            bad = dict(row); bad["prompt_path"] = str(root/"other.txt")
+            coordinator = root / "coordinator"
+            runtime_parent = root / "neutral"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                }],
+                coordinator, trials=1, seed=7, runtime_parent=runtime_parent,
+                token_factory=lambda: next(tokens),
+            )[0]
+            codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", row)
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+            bad = dict(row); bad["prompt_path"] = str(coordinator / "other.txt")
             with self.assertRaisesRegex(ValueError, "prompt path"):
-                codex_automation.validate_manifest_row_paths(manifest, bad)
+                codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", bad)
+
+            bad_fixture = dict(row); bad_fixture["fixture_path"] = str(coordinator / "other.json")
+            with self.assertRaisesRegex(ValueError, "fixture path"):
+                codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", bad_fixture)
+
             traversal = dict(row); traversal["case_key"] = "../escape"
-            traversal["prompt_path"] = str(root / "escape.txt")
-            traversal["workspace"] = str(root / "workspaces" / "escape")
             with self.assertRaisesRegex(ValueError, "case_key"):
-                codex_automation.validate_manifest_row_paths(manifest, traversal)
+                codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", traversal)
 
-            for case_key in ("foo:bar", "CON", "CON.txt", "NUL", "COM1", "LPT9", "foo.", "bad\x01key", "X" * 129):
-                invalid = {
-                    "case_key": case_key,
-                    "arm": "M",
-                    "prompt_path": str(root / "prompts" / f"{case_key}.txt"),
-                    "workspace": str(root / "workspaces" / "M" / case_key),
-                }
-                with self.subTest(case_key=repr(case_key)):
-                    with self.assertRaisesRegex(ValueError, "case_key"):
-                        codex_automation.validate_manifest_row_paths(manifest, invalid)
+    def test_validate_runtime_topology_rejects_nested_roots_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            runtime_root = root / "runtime" / ("a" * 32)
+            workspace = runtime_root / ("b" * 32)
+            coordinator.mkdir()
+            runtime_root.mkdir(parents=True)
+            codex_automation.validate_runtime_topology(coordinator, runtime_root, workspace)
 
+            nested_runtime = coordinator / ("c" * 32)
+            with self.assertRaisesRegex(ValueError, "disjoint"):
+                codex_automation.validate_runtime_topology(coordinator, nested_runtime, nested_runtime / ("d" * 32))
 
+            nested_coordinator = runtime_root / "coordinator"
+            with self.assertRaisesRegex(ValueError, "disjoint"):
+                codex_automation.validate_runtime_topology(nested_coordinator, runtime_root, workspace)
 
 
 class CampaignIdentityLockTests(unittest.TestCase):
@@ -595,6 +611,65 @@ class CampaignIdentityLockTests(unittest.TestCase):
 
 
 class RunRowWorkflowTests(unittest.TestCase):
+    def test_materialize_row_workspace_creates_only_active_fixture_and_preserves_crlf(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            runtime_parent = root / "neutral"
+            content = "@echo off\r\nexit /b 0\r\n"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"},
+                    "files": {"helper.cmd": content, "nested/input.txt": "same\n"},
+                }],
+                coordinator, trials=1, seed=7, runtime_parent=runtime_parent,
+                token_factory=lambda: next(tokens),
+            )[0]
+            runtime_root = pathlib.Path(row["runtime_root"])
+            self.assertEqual(list(runtime_root.iterdir()), [])
+            workspace = codex_automation.materialize_row_workspace(row)
+            self.assertEqual(list(runtime_root.iterdir()), [workspace])
+            self.assertEqual((workspace / "helper.cmd").read_bytes(), content.encode("utf-8"))
+            self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), row["fixture_sha256"])
+
+    def test_materialize_row_workspace_rejects_stale_peer_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            runtime_root = pathlib.Path(row["runtime_root"])
+            (runtime_root / ("f" * 32)).mkdir()
+            with self.assertRaisesRegex(RuntimeError, "runtime root.*empty"):
+                codex_automation.materialize_row_workspace(row)
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_materialize_row_workspace_rejects_symlinked_runtime_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            write_fixture = mock.Mock()
+            with mock.patch.object(pathlib.Path, "is_symlink", return_value=True), mock.patch.object(codex_automation.routing_eval, "_write_fixture", write_fixture):
+                with self.assertRaisesRegex(ValueError, "symlink|junction"):
+                    codex_automation.materialize_row_workspace(row)
+            write_fixture.assert_not_called()
+
     def test_workspace_fixture_sha256_matches_prepared_text_tree(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = pathlib.Path(temp_dir)

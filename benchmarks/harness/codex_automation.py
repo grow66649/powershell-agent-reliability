@@ -133,6 +133,43 @@ def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
     return routing_eval._fixture_sha256(files)
 
 
+def materialize_row_workspace(row: dict) -> pathlib.Path:
+    workspace = pathlib.Path(row["workspace"])
+    runtime_root = pathlib.Path(row["runtime_root"])
+    runtime_is_junction = getattr(runtime_root, "is_junction", lambda: False)
+    workspace_is_junction = getattr(workspace, "is_junction", lambda: False)
+    if runtime_root.is_symlink() or runtime_is_junction() or workspace.is_symlink() or workspace_is_junction():
+        raise ValueError("runtime root/workspace must not be a symlink or junction")
+    if not runtime_root.is_dir():
+        raise RuntimeError("runtime root must exist before row materialization")
+    if workspace.exists() or any(runtime_root.iterdir()):
+        raise RuntimeError("runtime root must be empty before row materialization")
+    fixture_path = pathlib.Path(row["fixture_path"])
+    try:
+        files = json.loads(fixture_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("frozen fixture payload is unreadable") from exc
+    if not isinstance(files, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in files.items()):
+        raise ValueError("frozen fixture payload must map text paths to text content")
+    routing_eval._write_fixture(workspace, files)
+    try:
+        actual_hash = workspace_fixture_sha256(workspace)
+        if actual_hash != row.get("fixture_sha256"):
+            raise ValueError("workspace fixture SHA256 mismatch")
+        return workspace
+    except Exception:
+        if workspace.exists():
+            shutil.rmtree(workspace)
+        raise
+
+
+def remove_runtime_workspace(workspace: pathlib.Path) -> None:
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    if workspace.exists():
+        raise RuntimeError(f"runtime workspace cleanup failed: {workspace}")
+
+
 def _toml_literal(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -744,26 +781,54 @@ def validate_case_key(case_key: str) -> str:
     return case_key
 
 
+def _is_relative_to(child: pathlib.Path, parent: pathlib.Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_runtime_topology(
+    coordinator_root: pathlib.Path,
+    runtime_root: pathlib.Path,
+    workspace: pathlib.Path,
+) -> None:
+    coordinator_root = coordinator_root.resolve(strict=False)
+    runtime_root = runtime_root.resolve(strict=False)
+    workspace = workspace.resolve(strict=False)
+    if _is_relative_to(runtime_root, coordinator_root) or _is_relative_to(coordinator_root, runtime_root):
+        raise ValueError("coordinator and runtime roots must be disjoint")
+    if workspace.parent != runtime_root:
+        raise ValueError("workspace must be a direct child of the frozen runtime root")
+
+
 def validate_manifest_row_paths(manifest_path: pathlib.Path, row: dict) -> None:
-    campaign_root = ensure_external_evidence_root(manifest_path.parent)
+    coordinator_root = ensure_external_evidence_root(manifest_path.parent)
     case_key = row.get("case_key")
     arm = row.get("arm")
     if arm not in {"S", "M"}:
         raise ValueError("manifest row must contain a valid case_key and arm")
     validate_case_key(case_key)
-    expected_prompt = (campaign_root / "prompts" / f"{case_key}.txt").resolve(strict=False)
-    expected_workspace = (campaign_root / "workspaces" / arm / case_key).resolve(strict=False)
-    for expected in (expected_prompt, expected_workspace):
-        try:
-            expected.relative_to(campaign_root)
-        except ValueError as exc:
-            raise ValueError("manifest case_key escapes the prepared campaign root") from exc
+    expected_prompt = (coordinator_root / "prompts" / f"{case_key}.txt").resolve(strict=False)
     actual_prompt = pathlib.Path(row.get("prompt_path", "")).resolve(strict=False)
     if actual_prompt != expected_prompt:
-        raise ValueError("manifest prompt path must use the prepared campaign layout")
-    actual_workspace = pathlib.Path(row.get("workspace", "")).resolve(strict=False)
-    if actual_workspace != expected_workspace:
-        raise ValueError("manifest workspace path must use the prepared campaign layout")
+        raise ValueError("manifest prompt path must use the prepared coordinator layout")
+    expected_fixture = (coordinator_root / "fixtures" / f"{case_key}.json").resolve(strict=False)
+    actual_fixture = pathlib.Path(row.get("fixture_path", "")).resolve(strict=False)
+    if actual_fixture != expected_fixture:
+        raise ValueError("manifest fixture path must use the prepared coordinator layout")
+    runtime_root = pathlib.Path(row.get("runtime_root", "")).resolve(strict=False)
+    workspace = pathlib.Path(row.get("workspace", "")).resolve(strict=False)
+    if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(runtime_root.name):
+        raise ValueError("manifest runtime root must end in an opaque 32-hex token")
+    if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(workspace.name):
+        raise ValueError("manifest workspace must use an opaque 32-hex row token")
+    validate_runtime_topology(coordinator_root, runtime_root, workspace)
+    if routing_eval.workspace_identity(str(runtime_root)) != row.get("runtime_root_sha256"):
+        raise ValueError("runtime root identity mismatch")
+    if routing_eval.workspace_identity(str(workspace)) != row.get("workspace_sha256"):
+        raise ValueError("workspace identity mismatch")
 
 
 def load_manifest_row(path: pathlib.Path, sequence: int) -> dict:
