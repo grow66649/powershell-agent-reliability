@@ -155,6 +155,7 @@ class CliExecutionTests(unittest.TestCase):
         fake = FakeProcess()
         popen = mock.Mock(return_value=fake)
         killer = mock.Mock()
+        clock = mock.Mock(side_effect=[10.0, 10.125])
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
             profile = root / "profile"
@@ -162,9 +163,10 @@ class CliExecutionTests(unittest.TestCase):
             profile.mkdir(); workspace.mkdir()
             result = codex_automation.run_codex_process(
                 pathlib.Path("C:/Codex/codex.exe"), workspace, profile, b"exact prompt\n",
-                root / "stdout.jsonl", root / "stderr.log", 12, popen_factory=popen, tree_killer=killer,
+                root / "stdout.jsonl", root / "stderr.log", 12, popen_factory=popen, tree_killer=killer, clock=clock,
             )
         self.assertTrue(result["timed_out"])
+        self.assertEqual(result["task_wall_clock_ms"], 125)
         self.assertEqual(result["termination_reason"], "timeout")
         killer.assert_called_once_with(fake)
         kwargs = popen.call_args.kwargs
@@ -269,7 +271,7 @@ class CliJsonAdapterTests(unittest.TestCase):
 
     def test_normalized_receipt_combines_process_catalog_tool_tokens_and_post_condition(self):
         manifest = {"case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "S", "sequence": 1, "prompt_sha256": "A" * 64, "workspace_sha256": "B" * 64, "fixture_sha256": "C" * 64}
-        process = {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit"}
+        process = {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 321}
         parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 2, "mcp_call_count": 1, "reliability_mcp_call_count": 1, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
         parsed["tokens"]["input_tokens"] = 12
         profile = {"cli_version": "0.148.0-alpha.9", "cli_sha256": "D" * 64, "profile_fingerprint": "E" * 64, "mcp_sha256": "F" * 64}
@@ -277,6 +279,7 @@ class CliJsonAdapterTests(unittest.TestCase):
         self.assertEqual(receipt["post_condition_passed"], True)
         self.assertEqual(receipt["reliability_mcp_call_count"], 1)
         self.assertEqual(receipt["input_tokens"], 12)
+        self.assertEqual(receipt["task_wall_clock_ms"], 321)
         self.assertEqual(receipt["skill_catalog"], ["powershell-reliability"])
         self.assertTrue(receipt["cleanup_ok"])
 

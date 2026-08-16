@@ -1,6 +1,6 @@
 # Isolated Codex Experiment Automation Profile Design
 
-Status: owner selected isolated-profile design A; written spec pending final owner review before implementation.
+Status: owner-approved isolated-profile design A; implementation is under review in Draft PR #1.
 
 ## Decision
 
@@ -16,7 +16,7 @@ Windows Codex Desktop remains the product-admission runtime. CLI automation may 
 - Exclude unrelated MCP servers, plugins, and Skills from automated runs.
 - Use one fresh process, profile, workspace, and prompt submission per row.
 - Preserve raw JSONL and deterministic post-condition evidence host-locally.
-- Keep latency analysis out of the first automation slice; record token/tool-call data when exposed.
+- Record exact token/tool-call fields and task wall-clock for each row; correctness/routing/safety remain primary, while timing is secondary paired evidence rather than a single-run winner metric.
 
 ## Non-goals
 
@@ -89,20 +89,20 @@ Each manifest row receives:
 3. an arm patch for S or M followed by a prompt-input conformance probe;
 4. one fresh Desktop-bundled CLI process;
 5. one exact prompt submitted once through redirected stdin;
-6. raw stdout JSONL, stderr, exit code, timeout state, and final message captured host-locally;
+6. raw stdout JSONL, stderr, exit code, timeout state, task wall-clock, and final message captured host-locally;
 7. deterministic post-condition evaluation independent of assistant prose;
 8. profile cleanup in a `finally` path.
 The exact CLI command is constructed as an argument array, never one nested command string. The implementation must pin the bundled CLI path and verify its version/hash before campaign execution. Prompt bytes are redirected through stdin so shell quoting cannot change the manifest-frozen prompt.
 
 The runner uses `--ephemeral --json`, the frozen workspace via `-C`, and the arm profile through `CODEX_HOME`. It must not use `--dangerously-bypass-approvals-and-sandbox`; the experiment preserves the frozen approval/sandbox policy from configuration.
 
-The existing 360-second campaign timeout remains the external kill boundary for both arms. This timeout is operational protection only in the first automated screen; wall-clock latency is not used to select S or M.
+The existing 360-second campaign timeout remains the external kill boundary for both arms. The runner records task wall-clock around the Codex process itself. Timing is secondary paired evidence: valid slow rows are retained, S/M order is balanced, and unstable timing is reported as inconclusive rather than forced into an arm-selection claim.
 
 ## Evidence and cleanup
 
 Raw CLI stdout JSONL, bounded stderr, final deterministic fixture state, and normalized routing records stay under the host-local evidence root. Secret-bearing `CODEX_HOME` contents are not evidence artifacts.
 
-The normalized execution receipt records at least: case/trial/arm, sequence, public-main anchor, CLI version/hash, redacted profile fingerprint, MCP hash, prompt hash, workspace/fixture identity, process exit/timeout state, post-condition truth, tool/Skill observations exposed by the rollout, token fields when present, and cleanup result.
+The normalized execution receipt records at least: case/trial/arm, sequence, public-main anchor, CLI version/hash, redacted profile fingerprint, MCP hash, prompt hash, workspace/fixture identity, process exit/timeout state, task wall-clock, post-condition truth, tool/Skill observations exposed by the rollout, token fields when present, and cleanup result.
 
 A command exit of zero does not imply task success. The deterministic post-condition remains authoritative. Conversely, an agent/task failure under a valid protocol remains a scored negative rather than an invalid row.
 

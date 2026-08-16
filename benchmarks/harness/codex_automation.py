@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 
 import routing_eval
@@ -217,6 +218,7 @@ def run_codex_process(
     timeout_seconds: int,
     popen_factory=subprocess.Popen,
     tree_killer=_kill_process_tree_windows,
+    clock=time.monotonic,
 ) -> dict:
     env = os.environ.copy()
     env["CODEX_HOME"] = str(profile)
@@ -225,6 +227,7 @@ def run_codex_process(
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
     timed_out = False
     termination_reason = "process_exit"
+    started_at = clock()
     with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
         process = popen_factory(
             codex_argv(exe, workspace),
@@ -240,11 +243,13 @@ def run_codex_process(
             termination_reason = "timeout"
             tree_killer(process)
             process.communicate()
+    task_wall_clock_ms = max(0, round((clock() - started_at) * 1000))
     return {
         "pid": process.pid,
         "exit_code": process.returncode,
         "timed_out": timed_out,
         "termination_reason": termination_reason,
+        "task_wall_clock_ms": task_wall_clock_ms,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
@@ -404,6 +409,7 @@ def normalized_execution_receipt(
         "process_exit_code": process_result.get("exit_code"),
         "timed_out": bool(process_result.get("timed_out")),
         "termination_reason": process_result.get("termination_reason"),
+        "task_wall_clock_ms": process_result.get("task_wall_clock_ms"),
         "thread_id": parsed.get("thread_id"),
         "turn_status": parsed.get("turn_status"),
         "native_command_count": parsed.get("native_command_count", 0),

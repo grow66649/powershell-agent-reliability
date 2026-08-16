@@ -75,6 +75,6 @@ Capability canaries may directly ask whether the Skill is available and may expl
 
 ## Evidence and cleanup
 
-`--ephemeral` means the runner must capture stdout JSONL directly; it must not wait for a session rollout file. Missing token fields remain `null` and are not synthesized. The first automation phase records token/tool-call evidence but does not use wall-clock latency to select S or M.
+`--ephemeral` means the runner must capture stdout JSONL directly; it must not wait for a session rollout file. Missing token fields remain `null` and are not synthesized. Each row also records `task_wall_clock_ms` around the Codex process. Compare time only across matched S/M rows with balanced order; keep valid slow rows and report unstable timing as inconclusive rather than forcing a winner.
 
 A cleanup failure blocks the campaign. Do not weaken ACLs, sandboxing, approval policy, PowerShell profiles, or global environment settings to force a run through.

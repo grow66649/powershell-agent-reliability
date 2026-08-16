@@ -17,7 +17,7 @@
 - Fresh `CODEX_HOME`, workspace, output namespace, and Codex process per row; initial concurrency is 1.
 - Prompt bytes are sent through stdin exactly once. No follow-up steering.
 - Deterministic workspace post-condition, not assistant prose or process exit 0, defines task completion.
-- Timing is not an arm-selection metric in this slice; 360 seconds is only the external stopping bound.
+- Record task wall-clock and exact token fields for each row. Correctness/routing/safety remain primary; timing is secondary paired evidence, and 360 seconds remains only the external stopping bound.
 - No Rust product, Skill wording, train cases, validation content, or routing scorer semantics change.
 
 ---
@@ -60,7 +60,7 @@
 **Interfaces:**
 - Produces: `verify_cli_identity(path, expected_version, expected_sha256)`, `run_codex_row(...) -> dict`, `restrict_profile_acl(path)`, `remove_profile(path)`.
 
-- [ ] **Step 1: Write failing tests** for refusing a mismatched CLI version/hash, structured argv, stdin prompt bytes, per-row CODEX_HOME, timeout classification, and cleanup failure blocking the row.
+- [ ] **Step 1: Write failing tests** for refusing a mismatched CLI version/hash, structured argv, stdin prompt bytes, per-row CODEX_HOME, monotonic task wall-clock, timeout classification, and cleanup failure blocking the row.
 - [ ] **Step 2: Run focused tests** and verify RED.
 - [ ] **Step 3: Implement CLI identity verification** with SHA-256 plus `codex --version`; never use PATH fallback.
 - [ ] **Step 4: Implement Windows profile ACL restriction** using the current `whoami` identity and `icacls`; fail closed before the model call if restriction cannot be verified.
