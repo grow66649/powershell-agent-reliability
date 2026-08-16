@@ -35,7 +35,13 @@ class RoutingEvalPrepareTests(unittest.TestCase):
     def test_prepare_campaign_creates_matched_s_m_pair(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            rows = routing_eval.prepare_campaign([_case()], root, trials=1, seed=7)
+            coordinator = root / "coordinator"
+            runtime_parent = root / "runtime-parent"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            rows = routing_eval.prepare_campaign(
+                [_case()], coordinator, trials=1, seed=7,
+                runtime_parent=runtime_parent, token_factory=lambda: next(tokens),
+            )
             self.assertEqual(len(rows), 2)
             self.assertEqual({row["arm"] for row in rows}, {"S", "M"})
             by_arm = {row["arm"]: row for row in rows}
@@ -43,20 +49,35 @@ class RoutingEvalPrepareTests(unittest.TestCase):
             self.assertEqual(by_arm["S"]["fixture_sha256"], by_arm["M"]["fixture_sha256"])
             self.assertNotEqual(by_arm["S"]["workspace_sha256"], by_arm["M"]["workspace_sha256"])
             self.assertEqual(by_arm["S"]["prompt_path"], by_arm["M"]["prompt_path"])
+            self.assertEqual(by_arm["S"]["fixture_path"], by_arm["M"]["fixture_path"])
             prompt = pathlib.Path(by_arm["S"]["prompt_path"]).read_text(encoding="utf-8")
             self.assertIn("[CASE-ID: R01-T01]", prompt)
+            self.assertEqual(json.loads(pathlib.Path(by_arm["S"]["fixture_path"]).read_text(encoding="utf-8")), _case()["files"])
+            runtime_root = runtime_parent / ("1" * 32)
+            self.assertTrue(runtime_root.is_dir())
+            self.assertEqual(list(runtime_root.iterdir()), [])
+            self.assertEqual({pathlib.Path(row["workspace"]).parent for row in rows}, {runtime_root})
+            self.assertEqual({pathlib.Path(row["workspace"]).name for row in rows}, {"2" * 32, "3" * 32})
+            self.assertTrue(all(not pathlib.Path(row["workspace"]).exists() for row in rows))
             for forbidden in ("powershell-reliability", "Reliability MCP", "arm S", "arm M"):
                 self.assertNotIn(forbidden.lower(), prompt.lower())
             required = {
                 "case_key", "case_id", "trial_id", "lane", "group", "arm", "sequence",
-                "prompt_path", "prompt_sha256", "workspace", "workspace_sha256",
-                "fixture_sha256", "expected_first_command_fragment", "boundary_detector",
+                "prompt_path", "prompt_sha256", "fixture_path", "runtime_root", "runtime_root_sha256",
+                "workspace", "workspace_sha256", "fixture_sha256",
+                "expected_first_command_fragment", "boundary_detector",
             }
             self.assertTrue(required.issubset(by_arm["S"]))
-            for relative in ("task.ps1", "nested/input.txt"):
-                s_bytes = (pathlib.Path(by_arm["S"]["workspace"]) / relative).read_bytes()
-                m_bytes = (pathlib.Path(by_arm["M"]["workspace"]) / relative).read_bytes()
-                self.assertEqual(s_bytes, m_bytes)
+
+    def test_prepare_campaign_rejects_reused_opaque_row_token(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["a" * 32, "b" * 32, "b" * 32])
+            with self.assertRaisesRegex(ValueError, "unique"):
+                routing_eval.prepare_campaign(
+                    [_case()], root / "coordinator", trials=1, seed=7,
+                    runtime_parent=root / "runtime-parent", token_factory=lambda: next(tokens),
+                )
 
     def test_prepare_campaign_rejects_workspace_prompt_token(self):
         case = _case()
@@ -949,6 +970,7 @@ class RoutingEvalReviewPostConditionEndToEndTests(unittest.TestCase):
             sessions.mkdir()
             for row in manifest:
                 workspace = pathlib.Path(row["workspace"])
+                workspace.mkdir(parents=True, exist_ok=False)
                 workspace.joinpath("result.txt").write_bytes(b"READY\n" if row["arm"] == "S" else b"STALE\n")
                 rows = _base_rollout(row["case_key"], workspace, skill_visible=row["arm"] == "S")
                 rows += _failed_command_rows()

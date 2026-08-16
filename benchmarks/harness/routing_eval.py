@@ -4,6 +4,9 @@ import hashlib
 import json
 import pathlib
 import random
+import re
+import secrets
+import tempfile
 import statistics
 import stat
 from collections import defaultdict
@@ -165,7 +168,24 @@ def _render_prompt(case: dict, case_key: str, trial_id: str) -> str:
     return prompt
 
 
-def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, seed: int) -> list[dict]:
+OPAQUE_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _opaque_token(token_factory=None) -> str:
+    value = (token_factory or (lambda: secrets.token_hex(16)))()
+    if not isinstance(value, str) or not OPAQUE_TOKEN_RE.fullmatch(value):
+        raise ValueError("opaque runtime token must be exactly 32 lowercase hex characters")
+    return value
+
+
+def prepare_campaign(
+    cases: list[dict],
+    output_root: pathlib.Path,
+    trials: int,
+    seed: int,
+    runtime_parent: pathlib.Path | None = None,
+    token_factory=None,
+) -> list[dict]:
     if trials < 1:
         raise ValueError("trials must be at least 1")
     if not cases:
@@ -176,12 +196,22 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
         if case["case_id"] in seen_ids:
             raise ValueError(f"duplicate case_id {case['case_id']}")
         seen_ids.add(case["case_id"])
+    output_root = output_root.resolve(strict=False)
+    runtime_parent = (runtime_parent or pathlib.Path(tempfile.gettempdir())).resolve(strict=False)
     prompts_dir = output_root / "prompts"
-    workspaces_dir = output_root / "workspaces"
+    fixtures_dir = output_root / "fixtures"
     prompts_dir.mkdir(parents=True, exist_ok=True)
-    workspaces_dir.mkdir(parents=True, exist_ok=True)
+    fixtures_dir.mkdir(parents=True, exist_ok=True)
+    runtime_parent.mkdir(parents=True, exist_ok=True)
+    campaign_token = _opaque_token(token_factory)
+    runtime_root = runtime_parent / campaign_token
+    try:
+        runtime_root.mkdir()
+    except FileExistsError as exc:
+        raise ValueError("opaque runtime root must be new and empty") from exc
     rng = random.Random(seed)
     manifest = []
+    used_row_tokens = set()
     for trial_number in range(1, trials + 1):
         trial_id = f"T{trial_number:02d}"
         round_cases = list(cases)
@@ -191,12 +221,18 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
             prompt = _render_prompt(case, case_key, trial_id)
             prompt_path = prompts_dir / f"{case_key}.txt"
             prompt_path.write_text(prompt, encoding="utf-8", newline="\n")
-            fixture_hash = _fixture_sha256(case.get("files") or {})
+            files = case.get("files") or {}
+            fixture_hash = _fixture_sha256(files)
+            fixture_path = fixtures_dir / f"{case_key}.json"
+            fixture_path.write_text(json.dumps(files, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
             first_arm = "S" if (pair_index + trial_number) % 2 == 0 else "M"
             arms = (first_arm, "M" if first_arm == "S" else "S")
             for arm in arms:
-                workspace = workspaces_dir / arm / case_key
-                _write_fixture(workspace, case.get("files") or {})
+                row_token = _opaque_token(token_factory)
+                if row_token in used_row_tokens:
+                    raise ValueError("opaque row tokens must be unique within a campaign")
+                used_row_tokens.add(row_token)
+                workspace = runtime_root / row_token
                 post_condition = _post_condition_rule(case)
                 if post_condition["kind"] == "workspace_state":
                     for check in post_condition["checks"]:
@@ -211,6 +247,9 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
                     "title": case.get("title"),
                     "prompt_path": str(prompt_path),
                     "prompt_sha256": trigger_eval._sha256_text(prompt),
+                    "fixture_path": str(fixture_path),
+                    "runtime_root": str(runtime_root),
+                    "runtime_root_sha256": workspace_identity(str(runtime_root)),
                     "workspace": str(workspace),
                     "workspace_sha256": workspace_identity(str(workspace)),
                     "fixture_sha256": fixture_hash,
@@ -225,6 +264,8 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
     summary["case_count"] = len(cases)
     summary["trials_per_case"] = trials
     summary["seed"] = seed
+    summary["runtime_root"] = str(runtime_root)
+    summary["runtime_root_sha256"] = workspace_identity(str(runtime_root))
     campaign_path = output_root / "campaign.json"
     campaign_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return manifest
@@ -1118,6 +1159,7 @@ def main(argv=None) -> int:
     prepare.add_argument("--cases", type=pathlib.Path, required=True)
     prepare.add_argument("--output-root", type=pathlib.Path, required=True)
     prepare.add_argument("--trials", type=int, default=3)
+    prepare.add_argument("--runtime-parent", type=pathlib.Path)
     prepare.add_argument("--seed", type=int, default=20260813)
 
     collect = sub.add_parser("collect")
@@ -1133,7 +1175,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
-            manifest = prepare_campaign(load_cases(args.cases), args.output_root, args.trials, args.seed)
+            manifest = prepare_campaign(load_cases(args.cases), args.output_root, args.trials, args.seed, runtime_parent=args.runtime_parent)
             result = {
                 "prepared_trials": len(manifest),
                 "manifest": str(args.output_root / "manifest.jsonl"),
