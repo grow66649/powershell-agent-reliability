@@ -375,6 +375,18 @@ class CliJsonAdapterTests(unittest.TestCase):
             result = codex_automation.evaluate_manifest_row(manifest, workspace)
             self.assertTrue(result["passed"])
 
+    def test_evaluate_manifest_row_rejects_workspace_root_link_before_grading(self):
+        workspace = pathlib.Path("C:/opaque/runtime/row")
+        manifest = {
+            "case_id": "X1",
+            "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]},
+        }
+        with mock.patch.object(codex_automation, "_path_is_link_or_junction", return_value=True):
+            with mock.patch.object(codex_automation.routing_eval, "evaluate_workspace_state") as evaluate:
+                with self.assertRaisesRegex(ValueError, "symlink|junction"):
+                    codex_automation.evaluate_manifest_row(manifest, workspace)
+        evaluate.assert_not_called()
+
     def test_normalized_receipt_combines_process_catalog_tool_tokens_and_post_condition(self):
         manifest = {"case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "S", "sequence": 1, "prompt_sha256": "A" * 64, "workspace_sha256": "B" * 64, "fixture_sha256": "C" * 64}
         process = {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 321}

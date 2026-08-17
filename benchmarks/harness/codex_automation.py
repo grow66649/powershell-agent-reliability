@@ -659,6 +659,8 @@ def evaluate_manifest_row(manifest_row: dict, workspace: pathlib.Path) -> dict:
     rule = row.get("post_condition", {"kind": "none"})
     kind = rule.get("kind") if isinstance(rule, dict) else None
     if kind == "workspace_state":
+        if _path_is_link_or_junction(workspace):
+            raise ValueError("workspace root must not be a symlink or junction during post-condition evaluation")
         return routing_eval.evaluate_workspace_state(row)
     if kind == "none":
         return routing_eval.evaluate_post_condition([], row)
