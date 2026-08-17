@@ -284,6 +284,27 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
 
 
+    def test_raw_fragment_rejects_whitespace_boundaries_inside_larger_quoted_token(self):
+        actual = 'pwsh.exe -File ".\\not helper.cmd suffix"'
+        self.assertFalse(trigger_eval.raw_command_fragment_matches("helper.cmd", actual))
+
+    def test_raw_fragment_rejects_long_backslash_run_before_literal_quote_suffix(self):
+        actual = 'cmd.exe /d /c "ver\\\\"suffix"'
+        self.assertFalse(trigger_eval.raw_command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_structured_wrapper_execution_property_is_case_sensitive(self):
+        actual = "tools.shell_command({COMMAND:'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_invalid_unquoted_metadata_scalar(self):
+        actual = "tools.shell_command({justification:@, command:'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_nested_execution_wrapper_in_metadata(self):
+        actual = "tools.shell_command({command:'helper.cmd', justification:tools.exec_command({cmd:'echo wrong'})})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):
         case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}
