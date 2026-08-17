@@ -157,6 +157,11 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertFalse(trigger_eval.command_fragment_matches(r"app\obrien.ps1", actual))
 
 
+    def test_quote_equivalence_preserves_escaped_apostrophe_inside_single_quoted_token(self):
+        actual = "pwsh.exe -File '.\\app\\o''brien.ps1'"
+        self.assertFalse(trigger_eval.command_fragment_matches(r"app\obrien.ps1", actual))
+
+
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):
         case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}
