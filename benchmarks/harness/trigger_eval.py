@@ -193,28 +193,17 @@ def validate_expected_first_command_fragment(value) -> str | None:
     return value
 
 
-_QUOTE_CHARS = set("\"'")
-_QUOTE_OPEN_BOUNDARIES = set(":=({[,;|&<>")
-
-
-def _normalize_match_quotes(value: str) -> str:
-    tokens = []
-    for token in value.split():
-        if token and token[0] in _QUOTE_CHARS:
-            token = token[1:]
-        tokens.append(token)
-    return " ".join(tokens)
-
 def _norm_command(value: str | None) -> str:
     if value is None:
         return ""
-    normalized = _normalize_match_quotes(value.lower().replace("/", "\\"))
+    normalized = value.lower().replace("/", "\\")
     while "\\\\" in normalized:
         normalized = normalized.replace("\\\\", "\\")
     return " ".join(normalized.split())
 
 
 _COMMAND_FRAGMENT_BOUNDARIES = set("\\/\"'()[]{};,&|<>")
+_QUOTE_OPEN_BOUNDARIES = set(":=({[,;|&<>")
 
 
 def _command_component_char(value: str) -> bool:
@@ -223,7 +212,7 @@ def _command_component_char(value: str) -> bool:
 
 def _left_fragment_boundary(command: str, index: int) -> bool:
     cursor = index - 1
-    while cursor >= 0 and command[cursor] in _QUOTE_CHARS:
+    while cursor >= 0 and command[cursor] in {"\"", "'"}:
         cursor -= 1
     if cursor < 0:
         return True
@@ -231,16 +220,31 @@ def _left_fragment_boundary(command: str, index: int) -> bool:
     return previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES or not _command_component_char(previous)
 
 
+def _cmd_c_single_token_quote_variant(fragment: str) -> str | None:
+    prefix = "cmd.exe \\d \\c "
+    if not fragment.startswith(prefix):
+        return None
+    tail = fragment[len(prefix):]
+    if not tail or any(char.isspace() for char in tail) or any(char in "\"'" for char in tail):
+        return None
+    return prefix + '"' + tail
+
+
 def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
     fragment = _norm_command(expected)
     command = _norm_command(actual)
+    quote_variant = _cmd_c_single_token_quote_variant(fragment)
     if not fragment or not command:
         return False
     start = 0
     while True:
         index = command.find(fragment, start)
         if index < 0:
-            return False
+            if quote_variant is None:
+                return False
+            fragment, quote_variant = quote_variant, None
+            start = 0
+            continue
         end = index + len(fragment)
         left_ok = (
             not _command_component_char(fragment[0])
