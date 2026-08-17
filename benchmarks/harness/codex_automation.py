@@ -956,8 +956,9 @@ def materialize_profile(
     live_hash_before = sha256_file(live_config_path)
     live = load_live_config(live_config_path)
     profile = pathlib.Path(tempfile.mkdtemp(prefix="psr-codex-profile-", dir=str(temp_parent) if temp_parent else None))
-    profile_identity = _filesystem_object_identity(profile)
+    profile_identity = None
     try:
+        profile_identity = _filesystem_object_identity(profile)
         acl_func(profile)
         initial_text = build_profile_text(live, arm, skill_path.as_posix(), mcp_path.as_posix())
         config_path = profile / "config.toml"
@@ -996,7 +997,10 @@ def materialize_profile(
         }
         return profile, meta, final_skills, mcp_catalog
     except Exception:
-        remove_profile(profile, expected_identity=profile_identity)
+        if profile_identity is None:
+            remove_profile(profile)
+        else:
+            remove_profile(profile, expected_identity=profile_identity)
         raise
 
 
@@ -1238,8 +1242,9 @@ def execute_run_row(
                 cleanup_errors.append(("profile", exc))
         if workspace_materialized:
             try:
-                if runtime_boundary is not None:
-                    validate_runtime_workspace_boundary(row, workspace, expected=runtime_boundary)
+                if runtime_boundary is None:
+                    raise RuntimeError("runtime boundary capture unavailable; recursive workspace cleanup refused")
+                validate_runtime_workspace_boundary(row, workspace, expected=runtime_boundary)
                 remove_runtime_workspace(workspace)
                 runtime_root, _ = validate_runtime_workspace_boundary(
                     row, workspace, expected=runtime_boundary, require_workspace=False

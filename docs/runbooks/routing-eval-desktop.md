@@ -138,7 +138,13 @@ python .\benchmarks\harness\routing_eval.py collect `
   --report <host-local-current-row-collect-report.json>
 ```
 
-The per-row report must contain exactly the intended row and no invalid record before cleanup. Collection binds the rollout to its exact opaque workspace first and evaluates the deterministic post-condition directly from that workspace; it does not run a verifier command and does not ask the agent to self-report pass/fail.
+Verify the per-row record file contains exactly the intended row and no invalid record before cleanup:
+
+```powershell
+python -c "import json,pathlib; p=pathlib.Path(r'<host-local-current-row-record.jsonl>'); rows=[json.loads(x) for x in p.read_text(encoding='utf-8').splitlines() if x.strip()]; assert len(rows)==1, 'expected exactly one current-row record'; assert rows[0].get('sequence')==<sequence>, 'wrong row collected'; assert rows[0].get('valid') is not False, 'current row invalid'"
+```
+
+The full manifest is intentional: the collector binds the rollout by its exact opaque workspace identity, while the per-row sessions directory plus this explicit sequence assertion limits the operator step to the intended row. Collection evaluates the deterministic post-condition directly from that workspace; it does not run a verifier command and does not ask the agent to self-report pass/fail.
 
 After the current row record is preserved, revalidate the same captured boundary **before** recursive deletion. If identity/topology changed, do not call the remover; preserve evidence and stop. Otherwise remove only the attempt-owned workspace and verify the original runtime root remains empty:
 

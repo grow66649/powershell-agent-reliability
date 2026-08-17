@@ -574,6 +574,19 @@ class MaterializeProfileTests(unittest.TestCase):
             finally:
                 codex_automation.remove_profile(profile)
 
+    def test_materialize_profile_cleans_fresh_profile_when_identity_capture_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            live_path = root / "live.toml"
+            live_path.write_text(codex_automation.build_profile_text(_live_config(), "S", PSR_SKILL, PSR_MCP), encoding="utf-8")
+            with mock.patch.object(codex_automation, "_filesystem_object_identity", side_effect=RuntimeError("identity capture failed")):
+                with self.assertRaisesRegex(RuntimeError, "identity capture failed"):
+                    codex_automation.materialize_profile(
+                        live_path, "S", pathlib.Path(PSR_SKILL), pathlib.Path(PSR_MCP), pathlib.Path("C:/Codex/codex.exe"),
+                        temp_parent=root, acl_func=mock.Mock(), skill_probe=mock.Mock(), mcp_probe=mock.Mock(),
+                    )
+            self.assertEqual(list(root.glob("psr-codex-profile-*")), [])
+
     def test_materialize_profile_cleans_partial_profile_when_probe_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -990,6 +1003,20 @@ class RunRowWorkflowTests(unittest.TestCase):
             (workspace / "helper.cmd").write_bytes(content.encode("utf-8"))
             expected = codex_automation.routing_eval._fixture_sha256({"helper.cmd": content})
             self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), expected)
+
+    def test_execute_run_row_refuses_recursive_cleanup_when_runtime_boundary_capture_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, _profile, _materialize, cli_identity = self._prepared_run(root)
+            remove_workspace = mock.Mock()
+            with mock.patch.object(codex_automation, "capture_runtime_workspace_boundary", side_effect=RuntimeError("boundary capture failed")), \
+                 mock.patch.object(codex_automation, "remove_runtime_workspace", remove_workspace):
+                with self.assertRaisesRegex(RuntimeError, "cleanup failed: workspace"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity),
+                    )
+            remove_workspace.assert_not_called()
+            self.assertTrue(pathlib.Path(row["workspace"]).is_dir())
 
     def test_execute_run_row_rejects_runtime_root_replacement_before_grading_or_recursive_cleanup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1420,6 +1447,8 @@ class OperatorArtifactTests(unittest.TestCase):
         self.assertIn("capture_runtime_workspace_boundary", desktop_runbook)
         self.assertGreaterEqual(desktop_runbook.count("validate_runtime_workspace_boundary"), 2)
         self.assertIn("os.path.lexists", desktop_runbook)
+        self.assertIn("expected exactly one current-row record", desktop_runbook)
+        self.assertIn("wrong row collected", desktop_runbook)
 
     def test_verify_local_runs_and_compiles_automation_tests(self):
         repo = pathlib.Path(__file__).resolve().parents[2]
