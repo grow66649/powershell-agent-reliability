@@ -216,6 +216,9 @@ def _command_component_char(value: str) -> bool:
 _STRUCTURED_TOOL_START_RE = re.compile(
     r"tools\.(shell_command|exec_command)\s*\(\s*\{"
 )
+_STRUCTURED_SCALAR_RE = re.compile(
+    r"(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)"
+)
 
 
 def _quote_is_escaped(value: str, index: int, start: int) -> bool:
@@ -253,11 +256,6 @@ def _structured_tool_starts(value: str) -> list[re.Match]:
                 continue
         index += 1
     return matches
-
-
-def _find_structured_tool_start(value: str):
-    matches = _structured_tool_starts(value)
-    return matches[0] if matches else None
 
 
 def _consume_quoted_string(value: str, index: int) -> tuple[str, int] | None:
@@ -303,49 +301,22 @@ def _consume_structured_key(value: str, index: int) -> tuple[str, int] | None:
 
 
 def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
-    quote = None
-    quote_start = index
-    stack: list[str] = []
-    closers = {"(": ")", "[": "]", "{": "}"}
-    started = False
-    scalar_gap = False
-    while index < len(value):
-        char = value[index]
-        if quote is not None:
-            if char == quote and not _quote_is_escaped(value, index, quote_start):
-                quote = None
-            index += 1
-            continue
-        if char.isspace():
-            if started and not stack:
-                scalar_gap = True
-            index += 1
-            continue
-        if scalar_gap and not stack and char not in {",", "}"}:
+    if index >= len(value):
+        return None
+    if value[index] in {"\"", "'", "`"}:
+        parsed = _consume_quoted_string(value, index)
+        if parsed is None:
             return None
-        if char in {"\"", "'", "`"}:
-            started = True
-            quote = char
-            quote_start = index + 1
-        elif char in closers:
-            started = True
-            stack.append(closers[char])
-        elif char in {")", "]", "}"}:
-            if stack:
-                if char != stack[-1]:
-                    return None
-                stack.pop()
-            elif char == "}":
-                return (index, char) if started else None
-            else:
-                return None
-        elif char == "," and not stack:
-            return (index, char) if started else None
-        else:
-            if not stack and not (char.isalnum() or char in "_.$+-"):
-                return None
-            started = True
+        _, index = parsed
+    else:
+        match = _STRUCTURED_SCALAR_RE.match(value, index)
+        if match is None:
+            return None
+        index = match.end()
+    while index < len(value) and value[index].isspace():
         index += 1
+    if index < len(value) and value[index] in {",", "}"}:
+        return index, value[index]
     return None
 
 
