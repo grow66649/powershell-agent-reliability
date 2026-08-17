@@ -617,8 +617,10 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
         invalid_reasons.append("arm_catalog_unobserved")
     elif (manifest_row["arm"] == "S") != psr_visible:
         invalid_reasons.append("arm_catalog_mismatch")
-    expected = manifest_row.get("expected_first_command_fragment")
-    if expected:
+    expected = trigger_eval.validate_expected_first_command_fragment(
+        manifest_row.get("expected_first_command_fragment")
+    )
+    if expected is not None:
         actual = first_command.get("input") if first_command else None
         if not trigger_eval.command_fragment_matches(expected, actual):
             invalid_reasons.append("first_command_mismatch")
@@ -706,6 +708,9 @@ def _malformed_rollout_cwd(path: pathlib.Path) -> str | None:
 def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[dict]:
     manifest_index = {}
     for row in manifest:
+        trigger_eval.validate_expected_first_command_fragment(
+            row.get("expected_first_command_fragment")
+        )
         key = row["workspace_sha256"]
         if key in manifest_index:
             raise ValueError(f"duplicate manifest workspace binding {key}")

@@ -125,6 +125,13 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         attached = trigger_eval.attach_manifest([record], manifest)
         self.assertTrue(attached[0]["first_command_matches_expectation"])
 
+    def test_attach_manifest_rejects_windows_component_character_collisions(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": "helper.cmd"}]
+        for command in (r"tools.shell_command pwsh.exe .\not+helper.cmd", r"tools.shell_command pwsh.exe .\not~helper.cmd"):
+            with self.subTest(command=command):
+                record = {"case_key": "C01-T01", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": [], "first_command_input": command}
+                attached = trigger_eval.attach_manifest([record], manifest)
+                self.assertFalse(attached[0]["first_command_matches_expectation"])
 
 
 class TriggerEvalDatasetContractTests(unittest.TestCase):

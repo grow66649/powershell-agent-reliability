@@ -313,6 +313,20 @@ class RoutingEvalTemporalTests(unittest.TestCase):
             record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
         self.assertNotIn("first_command_mismatch", record["invalid_reasons"])
 
+    def test_desktop_first_command_rejects_malformed_manifest_expectation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            rows = _base_rollout("R00C-T01", workspace, skill_visible=False) + [
+                _tool("cmd1", "tools.shell_command({command:'pwsh.exe -File ./task.ps1'})", "2026-08-14T00:00:01Z"),
+                _output("cmd1", "Exit code: 7", "2026-08-14T00:00:02Z"),
+            ]
+            for value in ("   ", 123):
+                with self.subTest(value=value):
+                    manifest = _manifest_row("R00C-T01", "M", workspace)
+                    manifest["expected_first_command_fragment"] = value
+                    with self.assertRaisesRegex(ValueError, "first command"):
+                        routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
+
     def test_s_failure_skill_then_mcp_is_valid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = pathlib.Path(temp_dir)
@@ -456,6 +470,17 @@ class RoutingEvalCollectionTests(unittest.TestCase):
                 handle.write('{"broken":\n')
             with self.assertRaisesRegex(ValueError, "malformed rollout for manifest workspace"):
                 routing_eval.collect_rollouts(root, manifest)
+
+    def test_collect_rejects_malformed_manifest_first_command_expectation_without_rollout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            workspace = root / "expected"
+            workspace.mkdir()
+            manifest = [_manifest_row("R03B-T01", "M", workspace)]
+            manifest[0]["expected_first_command_fragment"] = "   "
+            with self.assertRaisesRegex(ValueError, "first command"):
+                routing_eval.collect_rollouts(root, manifest)
+
     def test_collect_rejects_duplicate_same_arm_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)

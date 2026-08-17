@@ -202,8 +202,11 @@ def _norm_command(value: str | None) -> str:
     return " ".join(normalized.split())
 
 
+_COMMAND_FRAGMENT_BOUNDARIES = set("\\/\"'()[]{};,&|<>")
+
+
 def _command_component_char(value: str) -> bool:
-    return value.isalnum() or value in "._-"
+    return not value.isspace() and value not in _COMMAND_FRAGMENT_BOUNDARIES
 
 
 def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
