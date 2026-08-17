@@ -142,6 +142,225 @@ class TriggerEvalCampaignTests(unittest.TestCase):
                 attached = trigger_eval.attach_manifest([record], manifest)
                 self.assertFalse(attached[0]["first_command_matches_expectation"])
 
+    def test_attach_manifest_accepts_quote_equivalent_first_command_fragment(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_not_trigger", "title": "native version", "expected_first_command_fragment": "cmd.exe /d /c ver"}]
+        record = {"case_key": "C01-T01", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": [], "first_command_input": r'"C:\Program Files\PowerShell\7\pwsh.exe" -Command ''cmd.exe /d /c "ver > native-version.txt"'''}
+        attached = trigger_eval.attach_manifest([record], manifest)
+        self.assertTrue(attached[0]["first_command_matches_expectation"])
+
+    def test_quote_equivalence_does_not_bypass_component_collision_guard(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", r'pwsh.exe -File .\not+"helper.cmd"'))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", r'pwsh.exe -File .\not~"helper.cmd"'))
+
+    def test_quote_equivalence_preserves_literal_apostrophe_inside_quoted_token(self):
+        actual = "pwsh.exe -File \".\\app\\o'brien.ps1\""
+        self.assertFalse(trigger_eval.command_fragment_matches(r"app\obrien.ps1", actual))
+
+
+    def test_quote_equivalence_preserves_escaped_apostrophe_inside_single_quoted_token(self):
+        actual = "pwsh.exe -File '.\\app\\o''brien.ps1'"
+        self.assertFalse(trigger_eval.command_fragment_matches(r"app\obrien.ps1", actual))
+
+
+    def test_quote_equivalence_preserves_literal_apostrophe_inside_unquoted_token(self):
+        actual = "pwsh.exe -File .\\app\\o'brien.ps1"
+        self.assertFalse(trigger_eval.command_fragment_matches(r"app\obrien.ps1", actual))
+
+
+    def test_quote_equivalence_preserves_literal_double_quote_inside_single_quoted_token(self):
+        actual = "cmd.exe /d /c 'echo a\"b'"
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c echo ab", actual))
+
+
+    def test_quote_equivalence_preserves_doubled_double_quote_inside_double_quoted_token(self):
+        actual = 'cmd.exe /d /c "echo a""b"'
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c echo ab", actual))
+
+
+    def test_quote_equivalence_preserves_apostrophe_after_space_inside_double_quoted_token(self):
+        actual = 'cmd.exe /d /c "echo \'ab"'
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c echo ab", actual))
+
+    def test_quote_equivalence_preserves_double_quote_after_space_inside_single_quoted_token(self):
+        actual = "cmd.exe /d /c 'echo \"ab'"
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c echo ab", actual))
+
+
+    def test_quote_equivalence_ignores_quoted_cmd_text_in_wrapper_justification(self):
+        actual = "tools.shell_command({command:'echo wrong', justification:'run cmd.exe /d /c \"ver > native-version.txt\"'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_quote_equivalence_rejects_equals_component_collision(self):
+        actual = "tools.shell_command({command:'pwsh.exe -File .\\not=\"helper.cmd\"'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_command_field_still_matches(self):
+        actual = "tools.shell_command({command:'helper.cmd', justification:'do it'})"
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_ignores_wrapper_text_inside_metadata_before_command(self):
+        actual = """tools.shell_command({justification:'tools.shell_command({command:"helper.cmd"})', command:'echo wrong'})"""
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_supports_execution_field_after_metadata(self):
+        actual = "tools.shell_command({justification:'do it', command:'helper.cmd'})"
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_malformed_execution_field_suffix(self):
+        actual = "tools.shell_command({command:'helper.cmd'junk})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_quote_equivalence_rejects_suffix_after_closed_quoted_token(self):
+        actual = 'cmd.exe /d /c "ver"suffix'
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_raw_command_with_wrapper_marker_inside_quotes_stays_raw(self):
+        actual = '''pwsh.exe -Command "Write-Output 'tools.shell_command({'; helper.cmd"'''
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_exec_wrapper_supports_execution_field_after_metadata(self):
+        actual = "const r = await tools.exec_command({timeout_ms:1000, cmd:'helper.cmd'}); text(r.output);"
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_double_quoted_structured_command_decodes_escaped_quotes(self):
+        actual = r'tools.shell_command({command:"cmd.exe /d /c \"ver > native-version.txt\""})'
+        self.assertTrue(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_structured_command_decodes_escaped_apostrophe_without_identity_loss(self):
+        actual = r"tools.shell_command({command:'not\'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_duplicate_execution_fields(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({command:'helper.cmd', command:'echo wrong'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({command:'echo wrong', command:'helper.cmd'})"))
+
+    def test_structured_wrapper_requires_closing_parenthesis(self):
+        actual = "tools.shell_command({command:'helper.cmd'}"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_even_backslash_run_closes_field(self):
+        actual = r'tools.shell_command({command:"helper.cmd\\", justification:"x"})'
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_odd_backslash_run_preserves_literal_quote_identity(self):
+        actual = r'tools.shell_command({command:"not\\\"helper.cmd"})'
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_empty_metadata_values(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({justification:, command:'helper.cmd'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({command:'helper.cmd', justification:})"))
+
+    def test_quote_equivalence_rejects_colon_component_collision(self):
+        actual = r'pwsh.exe -File .\not:"helper.cmd"'
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_structured_wrapper_supports_observed_quoted_property_names(self):
+        actual = r'tools.shell_command({"justification":"do it","command":"helper.cmd"})'
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_shell_call_detection_ignores_wrapper_marker_inside_other_tool_string(self):
+        actual = 'tools.read_file({path:"literal tools.shell_command({ marker"})'
+        self.assertFalse(trigger_eval._is_shell_call(actual))
+
+    def test_shell_call_detection_ignores_wrapper_marker_inside_template_literal(self):
+        actual = 'tools.other({value:`literal tools.shell_command({ marker`})'
+        self.assertFalse(trigger_eval._is_shell_call(actual))
+
+
+    def test_escaped_literal_quote_suffix_does_not_create_right_boundary(self):
+        actual = r'tools.shell_command({command:"cmd.exe /d /c \"ver\\\"suffix\""})'
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_structured_wrapper_requires_lexical_case_sensitive_tool_name(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "nottools.shell_command({command:'helper.cmd'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "TOOLS.SHELL_COMMAND({command:'helper.cmd'})"))
+
+    def test_structured_wrapper_rejects_multiple_execution_wrappers(self):
+        actual = "tools.shell_command({command:'helper.cmd'}); tools.shell_command({command:'echo wrong'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_whitespace_split_metadata_scalar(self):
+        actual = "tools.shell_command({justification:foo bar, command:'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_raw_fragment_rejects_whitespace_boundaries_inside_larger_quoted_token(self):
+        actual = 'pwsh.exe -File ".\\not helper.cmd suffix"'
+        self.assertFalse(trigger_eval.raw_command_fragment_matches("helper.cmd", actual))
+
+    def test_raw_fragment_rejects_long_backslash_run_before_literal_quote_suffix(self):
+        actual = 'cmd.exe /d /c "ver\\\\"suffix"'
+        self.assertFalse(trigger_eval.raw_command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_structured_wrapper_execution_property_is_case_sensitive(self):
+        actual = "tools.shell_command({COMMAND:'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_invalid_unquoted_metadata_scalar(self):
+        actual = "tools.shell_command({justification:@, command:'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_nested_execution_wrapper_in_metadata(self):
+        actual = "tools.shell_command({command:'helper.cmd', justification:tools.exec_command({cmd:'echo wrong'})})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_structured_wrapper_rejects_unsupported_complex_metadata_values(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({metadata:{x:1}, command:'helper.cmd'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({command:'helper.cmd', metadata:[1,2]})"))
+
+
+    def test_shell_call_detection_preserves_legacy_unstructured_input(self):
+        actual = "tools.shell_command pwsh.exe -File helper.cmd"
+        self.assertTrue(trigger_eval._is_shell_call(actual))
+
+    def test_structured_wrapper_rejects_template_interpolation_nested_execution_wrapper(self):
+        actual = "tools.shell_command({justification:`${tools.exec_command({cmd:'echo wrong'})}`, command:'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_cmd_quote_variant_rejects_arbitrary_quoted_suffix(self):
+        actual = 'cmd.exe /d /c "ver suffix"'
+        self.assertFalse(trigger_eval.raw_command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_wrapper_like_pseudo_name_does_not_fall_back_to_raw_matching(self):
+        actual = "tools.shell_command_extra helper.cmd"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_structured_wrapper_rejects_unsupported_javascript_escapes(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", r"tools.shell_command({command:'helper.cmd\u0078'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", r'''tools.shell_command({command:'helper.cmd',"comm\u0061nd":'echo wrong'})'''))
+
+    def test_raw_fragment_rejects_long_backslash_quote_suffix(self):
+        actual = 'pwsh.exe -File "helper.cmd' + ("\\" * 4) + '"suffix"'
+        self.assertFalse(trigger_eval.raw_command_fragment_matches("helper.cmd", actual))
+
+
+    def test_wrapper_like_bracket_notation_fails_closed(self):
+        actual = 'tools["shell_command"]({command: "helper.cmd"})'
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_trailing_pseudo_wrapper_marker(self):
+        actual = "tools.shell_command({command:'helper.cmd'}); tools.exec_command_extra echo wrong"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_structured_wrapper_decodes_bounded_simple_javascript_escapes(self):
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", r"tools.shell_command({command:'helper.cmd\n'})"))
+        self.assertTrue(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", r'''tools.shell_command({command:'cmd.exe /d /c \"ver > native-version.txt\"'})'''))
+
+
+    def test_unrelated_tool_wrapper_with_quoted_shell_text_does_not_raw_match(self):
+        actual = '''tools.other({value:"literal tools.shell_command({command: 'helper.cmd'})"})'''
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_structured_wrapper_requires_admitted_top_level_context(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "foo(tools.shell_command({command:'helper.cmd'}))"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "// tools.shell_command({command:'helper.cmd'})"))
+
 
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):

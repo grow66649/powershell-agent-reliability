@@ -703,7 +703,7 @@ def validate_expected_first_command(row: dict, parsed: dict) -> None:
     if not commands or not isinstance(commands[0].get("command"), str):
         raise ValueError("manifest first command missing")
     actual = commands[0]["command"]
-    if not routing_eval.trigger_eval.command_fragment_matches(expected, actual):
+    if not routing_eval.trigger_eval.raw_command_fragment_matches(expected, actual):
         raise ValueError("manifest first command mismatch")
 
 

@@ -19,8 +19,19 @@ SHELL_CALLS = ("tools.shell_command", "tools.exec_command")
 VALID_GROUPS = {"should_trigger", "should_not_trigger", "boundary"}
 
 
+def _is_legacy_shell_call(call_input: str) -> bool:
+    stripped = call_input.lstrip()
+    return any(
+        stripped == name or (stripped.startswith(name) and len(stripped) > len(name) and stripped[len(name)].isspace())
+        for name in SHELL_CALLS
+    )
+
+
 def _is_shell_call(call_input: str) -> bool:
-    return any(name in call_input for name in SHELL_CALLS)
+    if not isinstance(call_input, str) or not call_input:
+        return False
+    recognized, _ = _structured_tool_command(call_input)
+    return recognized or _is_legacy_shell_call(call_input)
 
 
 def _sha256_text(value: str) -> str:
@@ -203,17 +214,276 @@ def _norm_command(value: str | None) -> str:
 
 
 _COMMAND_FRAGMENT_BOUNDARIES = set("\\/\"'()[]{};,&|<>")
+_QUOTE_OPEN_BOUNDARIES = set("({[,;|&<>")
 
 
 def _command_component_char(value: str) -> bool:
     return not value.isspace() and value not in _COMMAND_FRAGMENT_BOUNDARIES
 
 
-def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
-    fragment = _norm_command(expected)
-    command = _norm_command(actual)
-    if not fragment or not command:
+_STRUCTURED_TOOL_START_RE = re.compile(
+    r"tools\.(shell_command|exec_command)\s*\(\s*\{"
+)
+_STRUCTURED_AWAIT_PREFIX_RE = re.compile(
+    r"(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*=\s*await"
+)
+_STRUCTURED_SCALAR_RE = re.compile(
+    r"(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)"
+)
+_BRACKET_WRAPPER_MARKER_RE = re.compile(
+    r'''tools\s*\[\s*["'](?:shell_command|exec_command)["']\s*\]''',
+    re.IGNORECASE,
+)
+_TOOL_CALL_START_RE = re.compile(r"tools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_BRACKET_TOOL_CALL_RE = re.compile(r'''tools\s*\[\s*["'][A-Za-z_][A-Za-z0-9_]*["']\s*\]\s*\(''', re.IGNORECASE)
+
+
+def _quote_is_escaped(value: str, index: int, start: int) -> bool:
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= start and value[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 1
+
+
+def _structured_start_prefix_is_admitted(value: str, start: int) -> bool:
+    prefix = value[:start].strip()
+    if not prefix or prefix == "await":
+        return True
+    return _STRUCTURED_AWAIT_PREFIX_RE.fullmatch(prefix) is not None
+
+
+def _structured_tool_starts(value: str) -> list[re.Match]:
+    matches = []
+    quote = None
+    quote_start = 0
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote is not None:
+            if char == quote and not _quote_is_escaped(value, index, quote_start):
+                quote = None
+            index += 1
+            continue
+        if char in {"\"", "'", "`"}:
+            quote = char
+            quote_start = index + 1
+            index += 1
+            continue
+        match = _STRUCTURED_TOOL_START_RE.match(value, index)
+        if match is not None and _structured_start_prefix_is_admitted(value, index):
+            matches.append(match)
+            index = match.end()
+            continue
+        index += 1
+    return matches
+
+
+def _consume_quoted_string(value: str, index: int) -> tuple[str, int] | None:
+    quote = value[index]
+    cursor = index + 1
+    decoded: list[str] = []
+    while cursor < len(value):
+        char = value[cursor]
+        if char == quote:
+            return "".join(decoded), cursor + 1
+        if char != "\\":
+            decoded.append(char)
+            cursor += 1
+            continue
+        run_start = cursor
+        while cursor < len(value) and value[cursor] == "\\":
+            cursor += 1
+        backslashes = cursor - run_start
+        if cursor < len(value) and value[cursor] == quote:
+            decoded.append("\\" * (backslashes // 2))
+            if backslashes % 2 == 0:
+                return "".join(decoded), cursor + 1
+            decoded.append(quote)
+            cursor += 1
+            continue
+        decoded.append("\\" * (backslashes // 2))
+        if backslashes % 2 == 0:
+            continue
+        if cursor >= len(value):
+            return None
+        escaped = value[cursor]
+        simple_escapes = {"n": "\n", "r": "\r", "t": "\t", "\"": "\"", "'": "'"}
+        if escaped not in simple_escapes:
+            return None
+        decoded.append(simple_escapes[escaped])
+        cursor += 1
+    return None
+
+
+def _consume_structured_key(value: str, index: int) -> tuple[str, int] | None:
+    if index >= len(value):
+        return None
+    if value[index] in {"\"", "'"}:
+        parsed = _consume_quoted_string(value, index)
+        if parsed is None:
+            return None
+        key, index = parsed
+        return key, index
+    match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", value[index:])
+    if match is None:
+        return None
+    return match.group(0), index + len(match.group(0))
+
+
+def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
+    if index >= len(value):
+        return None
+    if value[index] in {"\"", "'", "`"}:
+        quote = value[index]
+        parsed = _consume_quoted_string(value, index)
+        if parsed is None:
+            return None
+        decoded, index = parsed
+        if quote == "`" and "${" in decoded:
+            return None
+    else:
+        match = _STRUCTURED_SCALAR_RE.match(value, index)
+        if match is None:
+            return None
+        index = match.end()
+    while index < len(value) and value[index].isspace():
+        index += 1
+    if index < len(value) and value[index] in {",", "}"}:
+        return index, value[index]
+    return None
+
+
+def _structured_tool_command(value: str) -> tuple[bool, str | None]:
+    matches = _structured_tool_starts(value)
+    if not matches:
+        return False, None
+    if len(matches) != 1:
+        return True, None
+    match = matches[0]
+    target = "command" if match.group(1) == "shell_command" else "cmd"
+    index = match.end()
+    command = None
+    command_seen = False
+    while index < len(value):
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index >= len(value):
+            return True, None
+        if value[index] == "}":
+            index += 1
+            while index < len(value) and value[index].isspace():
+                index += 1
+            if index >= len(value) or value[index] != ")":
+                return True, None
+            return True, command if command_seen else None
+        parsed_key = _consume_structured_key(value, index)
+        if parsed_key is None:
+            return True, None
+        key, index = parsed_key
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index >= len(value) or value[index] != ":":
+            return True, None
+        index += 1
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if key == target:
+            if command_seen or index >= len(value) or value[index] not in {"\"", "'"}:
+                return True, None
+            parsed = _consume_quoted_string(value, index)
+            if parsed is None:
+                return True, None
+            command, index = parsed
+            command_seen = True
+            while index < len(value) and value[index].isspace():
+                index += 1
+            if index >= len(value) or value[index] not in {",", "}"}:
+                return True, None
+            if value[index] == ",":
+                index += 1
+            continue
+        boundary = _skip_structured_value(value, index)
+        if boundary is None:
+            return True, None
+        index, delimiter = boundary
+        if delimiter == ",":
+            index += 1
+            continue
+    return True, None
+
+
+def _active_quote_at(value: str, position: int) -> str | None:
+    quote = None
+    quote_start = 0
+    index = 0
+    while index < min(position, len(value)):
+        char = value[index]
+        if quote is not None:
+            if char == quote and not _quote_is_escaped(value, index, quote_start):
+                quote = None
+        elif char in {"\"", "'"}:
+            quote = char
+            quote_start = index + 1
+        index += 1
+    return quote
+
+
+def _left_fragment_boundary(command: str, index: int) -> bool:
+    cursor = index - 1
+    if cursor >= 0 and command[cursor].isspace() and _active_quote_at(command, index) is not None:
+        boundary = cursor
+        while boundary >= 0 and command[boundary].isspace():
+            boundary -= 1
+        if boundary < 0 or command[boundary] not in _QUOTE_OPEN_BOUNDARIES:
+            return False
+    skipped_quote = False
+    while cursor >= 0 and command[cursor] in {"\"", "'"}:
+        skipped_quote = True
+        cursor -= 1
+    if cursor < 0:
+        return True
+    previous = command[cursor]
+    if skipped_quote:
+        return previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES
+    return previous.isspace() or not _command_component_char(previous)
+
+
+def _right_fragment_boundary(command: str, end: int) -> bool:
+    cursor = end
+    if cursor + 1 < len(command) and command[cursor] == "\\" and command[cursor + 1] in {"\"", "'"}:
         return False
+    active_quote = _active_quote_at(command, end)
+    if cursor < len(command) and active_quote is not None and command[cursor].isspace():
+        boundary = cursor
+        while boundary < len(command) and command[boundary].isspace():
+            boundary += 1
+        if boundary < len(command) and command[boundary] not in {active_quote, ")", "}", "]", ";", "|", "&", "<", ">"}:
+            return False
+    skipped_quote = False
+    while cursor < len(command) and command[cursor] in {"\"", "'"}:
+        skipped_quote = True
+        cursor += 1
+    if cursor >= len(command):
+        return True
+    following = command[cursor]
+    if skipped_quote:
+        return following.isspace() or following in ")}],;|&<>"
+    return not _command_component_char(following)
+
+
+def _cmd_c_single_token_quote_variant(fragment: str) -> str | None:
+    prefix = "cmd.exe \\d \\c "
+    if not fragment.startswith(prefix):
+        return None
+    tail = fragment[len(prefix):]
+    if not tail or any(char.isspace() for char in tail) or any(char in "\"'" for char in tail):
+        return None
+    return prefix + '"' + tail + " >"
+
+
+def _normalized_fragment_matches(fragment: str, command: str) -> bool:
     start = 0
     while True:
         index = command.find(fragment, start)
@@ -223,16 +493,116 @@ def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
         left_ok = (
             not _command_component_char(fragment[0])
             or index == 0
-            or not _command_component_char(command[index - 1])
+            or _left_fragment_boundary(command, index)
         )
         right_ok = (
             not _command_component_char(fragment[-1])
-            or end == len(command)
-            or not _command_component_char(command[end])
+            or _right_fragment_boundary(command, end)
         )
         if left_ok and right_ok:
             return True
         start = index + 1
+
+
+def raw_command_fragment_matches(expected: str | None, actual: str | None) -> bool:
+    fragment = _norm_command(expected)
+    command = _norm_command(actual)
+    if not fragment or not command:
+        return False
+    fragments = [fragment]
+    quote_variant = _cmd_c_single_token_quote_variant(fragment)
+    if quote_variant is not None:
+        fragments.append(quote_variant)
+    return any(_normalized_fragment_matches(item, command) for item in fragments)
+
+
+def _unquoted_tool_call_count(value: str) -> int:
+    quote = None
+    quote_start = 0
+    count = 0
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote is not None:
+            if char == quote and not _quote_is_escaped(value, index, quote_start):
+                quote = None
+            index += 1
+            continue
+        bracket_match = _BRACKET_TOOL_CALL_RE.match(value, index)
+        if bracket_match is not None:
+            count += 1
+            index = bracket_match.end()
+            continue
+        call_match = _TOOL_CALL_START_RE.match(value, index)
+        if call_match is not None:
+            count += 1
+            index = call_match.end()
+            continue
+        if char in {"\"", "'", "`"}:
+            quote = char
+            quote_start = index + 1
+        index += 1
+    return count
+
+
+def _unquoted_wrapper_marker_count(value: str) -> int:
+    quote = None
+    quote_start = 0
+    lowered = value.lower()
+    markers = ("tools.shell_command", "tools.exec_command")
+    count = 0
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote is not None:
+            if char == quote and not _quote_is_escaped(value, index, quote_start):
+                quote = None
+            index += 1
+            continue
+        bracket_match = _BRACKET_WRAPPER_MARKER_RE.match(value, index)
+        if bracket_match is not None:
+            count += 1
+            index = bracket_match.end()
+            continue
+        if char in {"\"", "'", "`"}:
+            quote = char
+            quote_start = index + 1
+            index += 1
+            continue
+        matched = False
+        for marker in markers:
+            if lowered.startswith(marker, index):
+                count += 1
+                index += len(marker)
+                matched = True
+                break
+        if not matched:
+            index += 1
+    return count
+
+
+def _has_unquoted_wrapper_marker(value: str) -> bool:
+    return _unquoted_wrapper_marker_count(value) > 0
+
+
+def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
+    if not isinstance(actual, str) or not actual:
+        return False
+    recognized, command = _structured_tool_command(actual)
+    marker_count = _unquoted_wrapper_marker_count(actual)
+    tool_call_count = _unquoted_tool_call_count(actual)
+    if recognized:
+        structured_count = len(_structured_tool_starts(actual))
+        if marker_count != structured_count or tool_call_count != structured_count:
+            return False
+        return command is not None and raw_command_fragment_matches(expected, command)
+    if _is_legacy_shell_call(actual):
+        if marker_count != 1 or tool_call_count:
+            return False
+        return raw_command_fragment_matches(expected, actual)
+    if marker_count or tool_call_count:
+        return False
+    return raw_command_fragment_matches(expected, actual)
 
 
 def attach_manifest(records: list[dict], manifest: list[dict]) -> list[dict]:

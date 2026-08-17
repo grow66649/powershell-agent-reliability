@@ -259,7 +259,7 @@ def _manifest_row(case_key, arm, workspace, group="should_trigger", detector=Non
 
 def _failed_command_rows():
     return [
-        _tool("cmd1", "tools.shell_command({command:'pwsh.exe -NoProfile -File .\\task.ps1'})", "2026-08-14T00:00:01Z"),
+        _tool("cmd1", "tools.shell_command({command:'pwsh.exe -NoProfile -File ./task.ps1'})", "2026-08-14T00:00:01Z"),
         _output("cmd1", "Exit code: 7", "2026-08-14T00:00:02Z"),
     ]
 
