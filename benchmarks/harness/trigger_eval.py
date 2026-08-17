@@ -227,6 +227,10 @@ _STRUCTURED_TOOL_START_RE = re.compile(
 _STRUCTURED_SCALAR_RE = re.compile(
     r"(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)"
 )
+_BRACKET_WRAPPER_MARKER_RE = re.compile(
+    r'''tools\s*\[\s*["'](?:shell_command|exec_command)["']\s*\]''',
+    re.IGNORECASE,
+)
 
 
 def _quote_is_escaped(value: str, index: int, start: int) -> bool:
@@ -289,7 +293,17 @@ def _consume_quoted_string(value: str, index: int) -> tuple[str, int] | None:
             decoded.append(quote)
             cursor += 1
             continue
-        decoded.append("\\" * backslashes)
+        decoded.append("\\" * (backslashes // 2))
+        if backslashes % 2 == 0:
+            continue
+        if cursor >= len(value):
+            return None
+        escaped = value[cursor]
+        simple_escapes = {"n": "\n", "r": "\r", "t": "\t", "\"": "\"", "'": "'"}
+        if escaped not in simple_escapes:
+            return None
+        decoded.append(simple_escapes[escaped])
+        cursor += 1
     return None
 
 
@@ -492,11 +506,12 @@ def raw_command_fragment_matches(expected: str | None, actual: str | None) -> bo
     return any(_normalized_fragment_matches(item, command) for item in fragments)
 
 
-def _has_unquoted_wrapper_marker(value: str) -> bool:
+def _unquoted_wrapper_marker_count(value: str) -> int:
     quote = None
     quote_start = 0
     lowered = value.lower()
     markers = ("tools.shell_command", "tools.exec_command")
+    count = 0
     index = 0
     while index < len(value):
         char = value[index]
@@ -505,27 +520,47 @@ def _has_unquoted_wrapper_marker(value: str) -> bool:
                 quote = None
             index += 1
             continue
+        bracket_match = _BRACKET_WRAPPER_MARKER_RE.match(value, index)
+        if bracket_match is not None:
+            count += 1
+            index = bracket_match.end()
+            continue
         if char in {"\"", "'", "`"}:
             quote = char
             quote_start = index + 1
             index += 1
             continue
+        matched = False
         for marker in markers:
             if lowered.startswith(marker, index):
-                return True
-        index += 1
-    return False
+                count += 1
+                index += len(marker)
+                matched = True
+                break
+        if not matched:
+            index += 1
+    return count
+
+
+def _has_unquoted_wrapper_marker(value: str) -> bool:
+    return _unquoted_wrapper_marker_count(value) > 0
 
 
 def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
     if not isinstance(actual, str) or not actual:
         return False
     recognized, command = _structured_tool_command(actual)
+    marker_count = _unquoted_wrapper_marker_count(actual)
     if recognized:
+        structured_count = len(_structured_tool_starts(actual))
+        if marker_count != structured_count:
+            return False
         return command is not None and raw_command_fragment_matches(expected, command)
     if _is_legacy_shell_call(actual):
+        if marker_count != 1:
+            return False
         return raw_command_fragment_matches(expected, actual)
-    if _has_unquoted_wrapper_marker(actual):
+    if marker_count:
         return False
     return raw_command_fragment_matches(expected, actual)
 

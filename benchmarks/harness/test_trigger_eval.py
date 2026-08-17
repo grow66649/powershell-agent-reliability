@@ -254,6 +254,7 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         actual = r'pwsh.exe -File .\not:"helper.cmd"'
         self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
 
+
     def test_structured_wrapper_supports_observed_quoted_property_names(self):
         actual = r'tools.shell_command({"justification":"do it","command":"helper.cmd"})'
         self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
@@ -326,6 +327,29 @@ class TriggerEvalCampaignTests(unittest.TestCase):
     def test_wrapper_like_pseudo_name_does_not_fall_back_to_raw_matching(self):
         actual = "tools.shell_command_extra helper.cmd"
         self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_structured_wrapper_rejects_unsupported_javascript_escapes(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", r"tools.shell_command({command:'helper.cmd\u0078'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", r'''tools.shell_command({command:'helper.cmd',"comm\u0061nd":'echo wrong'})'''))
+
+    def test_raw_fragment_rejects_long_backslash_quote_suffix(self):
+        actual = 'pwsh.exe -File "helper.cmd' + ("\\" * 4) + '"suffix"'
+        self.assertFalse(trigger_eval.raw_command_fragment_matches("helper.cmd", actual))
+
+
+    def test_wrapper_like_bracket_notation_fails_closed(self):
+        actual = 'tools["shell_command"]({command: "helper.cmd"})'
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_trailing_pseudo_wrapper_marker(self):
+        actual = "tools.shell_command({command:'helper.cmd'}); tools.exec_command_extra echo wrong"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
+    def test_structured_wrapper_decodes_bounded_simple_javascript_escapes(self):
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", r"tools.shell_command({command:'helper.cmd\n'})"))
+        self.assertTrue(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", r'''tools.shell_command({command:'cmd.exe /d /c \"ver > native-version.txt\"'})'''))
 
 
 class TriggerEvalDatasetContractTests(unittest.TestCase):
