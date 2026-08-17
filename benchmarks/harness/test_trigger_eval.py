@@ -352,6 +352,11 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertTrue(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", r'''tools.shell_command({command:'cmd.exe /d /c \"ver > native-version.txt\"'})'''))
 
 
+    def test_unrelated_tool_wrapper_with_quoted_shell_text_does_not_raw_match(self):
+        actual = '''tools.other({value:"literal tools.shell_command({command: 'helper.cmd'})"})'''
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):
         case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}

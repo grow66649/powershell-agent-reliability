@@ -231,6 +231,8 @@ _BRACKET_WRAPPER_MARKER_RE = re.compile(
     r'''tools\s*\[\s*["'](?:shell_command|exec_command)["']\s*\]''',
     re.IGNORECASE,
 )
+_TOOL_CALL_START_RE = re.compile(r"tools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_BRACKET_TOOL_CALL_RE = re.compile(r'''tools\s*\[\s*["'][A-Za-z_][A-Za-z0-9_]*["']\s*\]\s*\(''', re.IGNORECASE)
 
 
 def _quote_is_escaped(value: str, index: int, start: int) -> bool:
@@ -506,6 +508,35 @@ def raw_command_fragment_matches(expected: str | None, actual: str | None) -> bo
     return any(_normalized_fragment_matches(item, command) for item in fragments)
 
 
+def _unquoted_tool_call_count(value: str) -> int:
+    quote = None
+    quote_start = 0
+    count = 0
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote is not None:
+            if char == quote and not _quote_is_escaped(value, index, quote_start):
+                quote = None
+            index += 1
+            continue
+        bracket_match = _BRACKET_TOOL_CALL_RE.match(value, index)
+        if bracket_match is not None:
+            count += 1
+            index = bracket_match.end()
+            continue
+        call_match = _TOOL_CALL_START_RE.match(value, index)
+        if call_match is not None:
+            count += 1
+            index = call_match.end()
+            continue
+        if char in {"\"", "'", "`"}:
+            quote = char
+            quote_start = index + 1
+        index += 1
+    return count
+
+
 def _unquoted_wrapper_marker_count(value: str) -> int:
     quote = None
     quote_start = 0
@@ -551,16 +582,17 @@ def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
         return False
     recognized, command = _structured_tool_command(actual)
     marker_count = _unquoted_wrapper_marker_count(actual)
+    tool_call_count = _unquoted_tool_call_count(actual)
     if recognized:
         structured_count = len(_structured_tool_starts(actual))
-        if marker_count != structured_count:
+        if marker_count != structured_count or tool_call_count != structured_count:
             return False
         return command is not None and raw_command_fragment_matches(expected, command)
     if _is_legacy_shell_call(actual):
-        if marker_count != 1:
+        if marker_count != 1 or tool_call_count:
             return False
         return raw_command_fragment_matches(expected, actual)
-    if marker_count:
+    if marker_count or tool_call_count:
         return False
     return raw_command_fragment_matches(expected, actual)
 
