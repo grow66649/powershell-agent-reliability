@@ -23,7 +23,10 @@ def _is_shell_call(call_input: str) -> bool:
     if not isinstance(call_input, str) or not call_input:
         return False
     recognized, _ = _structured_tool_command(call_input)
-    return recognized
+    if recognized:
+        return True
+    stripped = call_input.lstrip()
+    return any(stripped == name or stripped.startswith(name + " ") for name in SHELL_CALLS)
 
 
 def _sha256_text(value: str) -> str:
@@ -304,10 +307,13 @@ def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
     if index >= len(value):
         return None
     if value[index] in {"\"", "'", "`"}:
+        quote = value[index]
         parsed = _consume_quoted_string(value, index)
         if parsed is None:
             return None
-        _, index = parsed
+        decoded, index = parsed
+        if quote == "`" and "${" in decoded:
+            return None
     else:
         match = _STRUCTURED_SCALAR_RE.match(value, index)
         if match is None:

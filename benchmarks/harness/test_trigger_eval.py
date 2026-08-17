@@ -310,6 +310,15 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({command:'helper.cmd', metadata:[1,2]})"))
 
 
+    def test_shell_call_detection_preserves_legacy_unstructured_input(self):
+        actual = "tools.shell_command pwsh.exe -File helper.cmd"
+        self.assertTrue(trigger_eval._is_shell_call(actual))
+
+    def test_structured_wrapper_rejects_template_interpolation_nested_execution_wrapper(self):
+        actual = "tools.shell_command({justification:`${tools.exec_command({cmd:'echo wrong'})}`, command:'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):
         case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}
