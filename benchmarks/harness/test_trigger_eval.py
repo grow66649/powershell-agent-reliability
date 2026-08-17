@@ -222,6 +222,22 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         actual = "const r = await tools.exec_command({timeout_ms:1000, cmd:'helper.cmd'}); text(r.output);"
         self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
 
+    def test_double_quoted_structured_command_decodes_escaped_quotes(self):
+        actual = r'tools.shell_command({command:"cmd.exe /d /c \"ver > native-version.txt\""})'
+        self.assertTrue(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_structured_command_decodes_escaped_apostrophe_without_identity_loss(self):
+        actual = r"tools.shell_command({command:'not\'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_duplicate_execution_fields(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({command:'helper.cmd', command:'echo wrong'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({command:'echo wrong', command:'helper.cmd'})"))
+
+    def test_structured_wrapper_requires_closing_parenthesis(self):
+        actual = "tools.shell_command({command:'helper.cmd'}"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
 
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):

@@ -252,9 +252,18 @@ def _consume_quoted_string(value: str, index: int) -> tuple[str, int] | None:
     quote = value[index]
     start = index + 1
     cursor = start
+    decoded: list[str] = []
+    segment_start = start
     while cursor < len(value):
+        if value[cursor] == "\\" and cursor + 1 < len(value) and value[cursor + 1] == quote:
+            decoded.append(value[segment_start:cursor])
+            decoded.append(quote)
+            cursor += 2
+            segment_start = cursor
+            continue
         if value[cursor] == quote and not _quote_is_escaped(value, cursor, start):
-            return value[start:cursor], cursor + 1
+            decoded.append(value[segment_start:cursor])
+            return "".join(decoded), cursor + 1
         cursor += 1
     return None
 
@@ -297,11 +306,20 @@ def _structured_tool_command(value: str) -> tuple[bool, str | None]:
         return False, None
     target = "command" if match.group(1).lower() == "shell_command" else "cmd"
     index = match.end()
+    command = None
+    command_seen = False
     while index < len(value):
         while index < len(value) and value[index].isspace():
             index += 1
-        if index >= len(value) or value[index] == "}":
+        if index >= len(value):
             return True, None
+        if value[index] == "}":
+            index += 1
+            while index < len(value) and value[index].isspace():
+                index += 1
+            if index >= len(value) or value[index] != ")":
+                return True, None
+            return True, command if command_seen else None
         key_match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", value[index:])
         if key_match is None:
             return True, None
@@ -315,26 +333,29 @@ def _structured_tool_command(value: str) -> tuple[bool, str | None]:
         while index < len(value) and value[index].isspace():
             index += 1
         if key == target:
-            if index >= len(value) or value[index] not in {"\"", "'"}:
+            if command_seen or index >= len(value) or value[index] not in {"\"", "'"}:
                 return True, None
             parsed = _consume_quoted_string(value, index)
             if parsed is None:
                 return True, None
             command, index = parsed
+            command_seen = True
             while index < len(value) and value[index].isspace():
                 index += 1
             if index >= len(value) or value[index] not in {",", "}"}:
                 return True, None
-            return True, command
+            if value[index] == ",":
+                index += 1
+                continue
+            continue
         boundary = _skip_structured_value(value, index)
         if boundary is None:
             return True, None
         index, delimiter = boundary
-        if delimiter == "}":
-            return True, None
-        index += 1
+        if delimiter == ",":
+            index += 1
+            continue
     return True, None
-
 
 def _command_match_candidates(value: str | None) -> list[str]:
     if not isinstance(value, str) or not value:
