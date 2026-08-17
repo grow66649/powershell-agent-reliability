@@ -407,6 +407,23 @@ class CliJsonAdapterTests(unittest.TestCase):
 
 
 class ContaminationDetectionTests(unittest.TestCase):
+    def test_text_mentions_windows_path_rejects_near_prefix(self):
+        target = pathlib.Path("C:/campaign/coordinator")
+        self.assertTrue(codex_automation._text_mentions_windows_path(f"Get-ChildItem '{target}'", target))
+        self.assertTrue(codex_automation._text_mentions_windows_path(f"Get-ChildItem '{target}/fixtures/x.json'", target))
+        self.assertFalse(codex_automation._text_mentions_windows_path(f"Get-ChildItem '{target}-cache'", target))
+
+    def test_detect_campaign_contamination_resolves_coordinator_before_hashing(self):
+        relative = pathlib.Path("relative-coordinator")
+        resolved = relative.resolve(strict=False)
+        current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": "C:/runtime/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        parsed = {"commands": [{"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{resolved}'"}]}
+        evidence = codex_automation.detect_campaign_contamination(parsed, [current], current, relative)
+        self.assertEqual(evidence, [{
+            "kind": "coordinator_access", "command_id": "c1",
+            "path_sha256": codex_automation._known_path_sha256(resolved),
+        }])
+
     def test_detect_campaign_contamination_reports_only_known_coordinator_or_other_row_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -1069,6 +1086,21 @@ class RunRowWorkflowTests(unittest.TestCase):
             self.assertFalse(profile.exists())
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
             self.assertFalse((args.evidence_root / f"{row['sequence']:04d}-{row['case_key']}-M").exists())
+
+    def test_execute_run_row_rejects_evidence_root_inside_runtime_root_before_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root)
+            args.evidence_root = pathlib.Path(row["runtime_root"]) / "evidence"
+            process = mock.Mock(return_value={"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1})
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with self.assertRaisesRegex(ValueError, "evidence root.*runtime"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                )
+            process.assert_not_called()
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
 
     def test_execute_run_row_rejects_evidence_root_inside_workspace_before_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:

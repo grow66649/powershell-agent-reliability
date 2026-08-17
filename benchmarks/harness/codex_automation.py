@@ -124,6 +124,14 @@ def ensure_evidence_outside_workspace(evidence_root: pathlib.Path, workspace: pa
     raise ValueError("evidence root must not equal or descend from the row workspace")
 
 
+def ensure_evidence_runtime_disjoint(evidence_root: pathlib.Path, runtime_root: pathlib.Path) -> pathlib.Path:
+    resolved_evidence = evidence_root.resolve(strict=False)
+    resolved_runtime = runtime_root.resolve(strict=False)
+    if _is_relative_to(resolved_evidence, resolved_runtime) or _is_relative_to(resolved_runtime, resolved_evidence):
+        raise ValueError("evidence root and runtime root must be disjoint")
+    return resolved_evidence
+
+
 def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
     is_junction = getattr(workspace, "is_junction", lambda: False)
     if workspace.is_symlink() or is_junction():
@@ -609,7 +617,10 @@ def _text_mentions_windows_path(text: str, path: pathlib.Path | str) -> bool:
         return False
     normalized_text = text.replace("/", "\\").casefold()
     normalized_path = str(pathlib.PureWindowsPath(str(path))).replace("/", "\\").rstrip("\\").casefold()
-    return bool(normalized_path) and normalized_path in normalized_text
+    if not normalized_path:
+        return False
+    pattern = rf"(?<![A-Za-z0-9_.-]){re.escape(normalized_path)}(?![A-Za-z0-9_.-])"
+    return re.search(pattern, normalized_text) is not None
 
 
 def detect_campaign_contamination(
@@ -618,6 +629,7 @@ def detect_campaign_contamination(
     current_row: dict,
     coordinator_root: pathlib.Path,
 ) -> list[dict]:
+    coordinator_root = coordinator_root.resolve(strict=False)
     current_workspace = str(current_row.get("workspace") or "")
     current_key = _windows_path_key(current_workspace) if current_workspace else ""
     other_paths = []
@@ -1039,6 +1051,7 @@ def execute_run_row(
         raise ValueError("prompt hash mismatch")
     workspace = pathlib.Path(row["workspace"])
     ensure_evidence_outside_workspace(args.evidence_root, workspace)
+    ensure_evidence_runtime_disjoint(args.evidence_root, pathlib.Path(row["runtime_root"]))
     output_dir = args.evidence_root / f"{args.sequence:04d}-{row['case_key']}-{args.arm}"
     if output_dir.exists():
         raise FileExistsError(f"row evidence already exists: {output_dir}")
