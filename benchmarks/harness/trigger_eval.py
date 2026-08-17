@@ -204,6 +204,10 @@ def _normalize_match_quotes(value: str) -> str:
     while index < len(value):
         char = value[index]
         if char == '"':
+            if in_single_quotes:
+                chars.append(char)
+                index += 1
+                continue
             previous = chars[-1] if chars else ""
             if not chars or previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES:
                 chars.append(" ")
