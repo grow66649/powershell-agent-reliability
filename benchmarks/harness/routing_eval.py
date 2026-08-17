@@ -136,6 +136,11 @@ def _validate_case(case: dict) -> None:
         raise ValueError(f"case {case['case_id']} missing prompt")
     if "{workspace}" in case["prompt"]:
         raise ValueError("routing prompts must not contain {workspace}")
+    expected_first_command = case.get("expected_first_command_fragment")
+    if expected_first_command is not None and (
+        not isinstance(expected_first_command, str) or not expected_first_command.strip()
+    ):
+        raise ValueError("expected first command fragment must be a non-empty string")
     detector = case.get("boundary_detector")
     if not isinstance(detector, dict) or detector.get("kind") not in BOUNDARY_KINDS:
         raise ValueError(f"invalid boundary detector for {case['case_id']}")
@@ -615,7 +620,7 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
     expected = manifest_row.get("expected_first_command_fragment")
     if expected:
         actual = first_command.get("input") if first_command else None
-        if trigger_eval._norm_command(expected) not in trigger_eval._norm_command(actual):
+        if not trigger_eval.command_fragment_matches(expected, actual):
             invalid_reasons.append("first_command_mismatch")
     premature = boundary_index is not None and any(index < boundary_index for index in skill_indexes)
     pre_boundary_mcp = (

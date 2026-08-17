@@ -178,6 +178,17 @@ class RoutingEvalPrepareTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "workspace"):
                 routing_eval.prepare_campaign([case], pathlib.Path(temp_dir), trials=1, seed=7)
 
+    def test_prepare_campaign_rejects_blank_expected_first_command_fragment(self):
+        case = _case()
+        case["expected_first_command_fragment"] = "   "
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            with self.assertRaisesRegex(ValueError, "first command"):
+                routing_eval.prepare_campaign(
+                    [case], root / "coordinator", trials=1, seed=7,
+                    runtime_parent=root / "runtime-parent",
+                )
+
     def test_prepare_campaign_is_seed_deterministic_and_pair_balanced(self):
         cases = [_case(f"R{i:02d}") for i in range(1, 6)]
         signatures = []
@@ -276,6 +287,30 @@ class RoutingEvalTemporalTests(unittest.TestCase):
             ]
             record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
         self.assertIsNotNone(record["first_attempt_start_index"])
+        self.assertNotIn("first_command_mismatch", record["invalid_reasons"])
+
+    def test_desktop_first_command_rejects_near_fragment_collision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("R00A-T01", "M", workspace)
+            manifest["expected_first_command_fragment"] = "task.ps1"
+            rows = _base_rollout("R00A-T01", workspace, skill_visible=False) + [
+                _tool("cmd1", "tools.shell_command({command:'pwsh.exe -File .\not-task.ps1'})", "2026-08-14T00:00:01Z"),
+                _output("cmd1", "Exit code: 7", "2026-08-14T00:00:02Z"),
+            ]
+            record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
+        self.assertIn("first_command_mismatch", record["invalid_reasons"])
+
+    def test_desktop_first_command_accepts_windows_path_separator_variant(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = pathlib.Path(temp_dir)
+            manifest = _manifest_row("R00B-T01", "M", workspace)
+            manifest["expected_first_command_fragment"] = r"app\build.ps1"
+            rows = _base_rollout("R00B-T01", workspace, skill_visible=False) + [
+                _tool("cmd1", "tools.shell_command({command:'pwsh.exe -File ./app/build.ps1'})", "2026-08-14T00:00:01Z"),
+                _output("cmd1", "Exit code: 7", "2026-08-14T00:00:02Z"),
+            ]
+            record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)
         self.assertNotIn("first_command_mismatch", record["invalid_reasons"])
 
     def test_s_failure_skill_then_mcp_is_valid(self):

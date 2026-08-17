@@ -271,6 +271,17 @@ class CliJsonAdapterTests(unittest.TestCase):
         self.assertIsNone(parsed["tokens"]["total_tokens"])
         self.assertEqual(parsed["final_message"], "READY")
 
+    def test_parse_cli_jsonl_preserves_started_command_identity_when_completion_differs(self):
+        rows = [
+            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "wrong-first.ps1", "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "expected.ps1", "exit_code": 0, "status": "completed"}},
+            {"type": "turn.completed", "usage": {}},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parsed = codex_automation.parse_cli_jsonl(self._write_jsonl(temp_dir, rows))
+        self.assertEqual(parsed["commands"][0]["command"], "wrong-first.ps1")
+        self.assertEqual(parsed["commands"][0]["exit_code"], 0)
+
     def test_parse_cli_jsonl_rejects_orphan_tool_completions(self):
         orphan_items = [
             {"id": "c1", "type": "command_execution", "exit_code": 0, "status": "completed"},
@@ -879,6 +890,74 @@ class RunRowWorkflowTests(unittest.TestCase):
             self.assertTrue(receipt["cleanup_ok"])
             self.assertFalse(profile.exists())
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_rejects_near_first_command_fragment_collision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(
+                root, expected_first_command_fragment="helper.cmd",
+            )
+            parsed = self._parsed_run(r"pwsh.exe -File .\\not-helper.cmd")
+            process = mock.Mock(return_value={
+                "exit_code": 0, "timed_out": False,
+                "termination_reason": "process_exit", "task_wall_clock_ms": 1,
+            })
+            with self.assertRaisesRegex(ValueError, "first command.*mismatch"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                )
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_accepts_forward_slash_first_command_path_variant(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(
+                root, expected_first_command_fragment=r"app\build.ps1",
+            )
+            parsed = self._parsed_run("pwsh.exe -File ./app/build.ps1")
+            process = mock.Mock(return_value={
+                "exit_code": 0, "timed_out": False,
+                "termination_reason": "process_exit", "task_wall_clock_ms": 1,
+            })
+            receipt = codex_automation.execute_run_row(
+                args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                process_runner=process, json_parser=mock.Mock(return_value=parsed),
+            )
+            self.assertTrue(receipt["cleanup_ok"])
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_rejects_blank_manifest_first_command_expectation_and_cleans_up(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(
+                root, expected_first_command_fragment="helper.cmd",
+            )
+            manifest_rows = [json.loads(line) for line in args.manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+            for manifest_row in manifest_rows:
+                if manifest_row["sequence"] == row["sequence"]:
+                    manifest_row["expected_first_command_fragment"] = "   "
+            args.manifest.write_text(
+                "".join(json.dumps(item) + "\n" for item in manifest_rows),
+                encoding="utf-8", newline="\n",
+            )
+            parsed = self._parsed_run("helper.cmd")
+            process = mock.Mock(return_value={
+                "exit_code": 0, "timed_out": False,
+                "termination_reason": "process_exit", "task_wall_clock_ms": 1,
+            })
+            with self.assertRaisesRegex(ValueError, "first command.*expectation"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                )
+            process.assert_not_called()
+            materialize.assert_not_called()
+            self.assertTrue(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
     def test_materialize_row_workspace_creates_only_active_fixture_and_preserves_crlf(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
