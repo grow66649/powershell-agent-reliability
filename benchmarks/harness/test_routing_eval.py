@@ -295,7 +295,7 @@ class RoutingEvalTemporalTests(unittest.TestCase):
             manifest = _manifest_row("R00A-T01", "M", workspace)
             manifest["expected_first_command_fragment"] = "task.ps1"
             rows = _base_rollout("R00A-T01", workspace, skill_visible=False) + [
-                _tool("cmd1", "tools.shell_command({command:'pwsh.exe -File .\not-task.ps1'})", "2026-08-14T00:00:01Z"),
+                _tool("cmd1", r"tools.shell_command({command:'pwsh.exe -File .\not-task.ps1'})", "2026-08-14T00:00:01Z"),
                 _output("cmd1", "Exit code: 7", "2026-08-14T00:00:02Z"),
             ]
             record = routing_eval.extract_trial(rows, pathlib.Path("r.jsonl"), manifest)

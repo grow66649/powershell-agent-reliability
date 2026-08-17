@@ -185,6 +185,14 @@ def extract_rollout(
     }
 
 
+def validate_expected_first_command_fragment(value) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("expected first command fragment must be a non-empty string")
+    return value
+
+
 def _norm_command(value: str | None) -> str:
     if value is None:
         return ""
@@ -234,9 +242,9 @@ def attach_manifest(records: list[dict], manifest: list[dict]) -> list[dict]:
         row = dict(record)
         for key in ("case_id", "trial_id", "group", "title", "sequence", "expected_first_command_fragment"):
             row[key] = meta.get(key)
-        expected = meta.get("expected_first_command_fragment")
+        expected = validate_expected_first_command_fragment(meta.get("expected_first_command_fragment"))
         command_input = record.get("first_command_input")
-        if expected:
+        if expected is not None:
             row["first_command_matches_expectation"] = command_fragment_matches(expected, command_input)
         else:
             row["first_command_matches_expectation"] = None
@@ -375,12 +383,15 @@ def load_cases(path: pathlib.Path) -> list[dict]:
             raise ValueError(f"invalid group for {case.get('case_id')}")
         if "prompt" not in case or "title" not in case:
             raise ValueError(f"case {case.get('case_id')} missing title or prompt")
+        validate_expected_first_command_fragment(case.get("expected_first_command_fragment"))
     return value
 
 
 def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, seed: int) -> list[dict]:
     if trials < 1:
         raise ValueError("trials must be at least 1")
+    for case in cases:
+        validate_expected_first_command_fragment(case.get("expected_first_command_fragment"))
     prompts_dir = output_root / "prompts"
     workspaces_dir = output_root / "workspaces"
     prompts_dir.mkdir(parents=True, exist_ok=True)

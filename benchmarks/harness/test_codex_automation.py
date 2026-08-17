@@ -282,6 +282,17 @@ class CliJsonAdapterTests(unittest.TestCase):
         self.assertEqual(parsed["commands"][0]["command"], "wrong-first.ps1")
         self.assertEqual(parsed["commands"][0]["exit_code"], 0)
 
+    def test_parse_cli_jsonl_does_not_backfill_missing_started_command_from_completion(self):
+        rows = [
+            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "expected.ps1", "exit_code": 0, "status": "completed"}},
+            {"type": "turn.completed", "usage": {}},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parsed = codex_automation.parse_cli_jsonl(self._write_jsonl(temp_dir, rows))
+        self.assertNotIn("command", parsed["commands"][0])
+        self.assertEqual(parsed["commands"][0]["exit_code"], 0)
+
     def test_parse_cli_jsonl_rejects_orphan_tool_completions(self):
         orphan_items = [
             {"id": "c1", "type": "command_execution", "exit_code": 0, "status": "completed"},
@@ -948,11 +959,13 @@ class RunRowWorkflowTests(unittest.TestCase):
                 "exit_code": 0, "timed_out": False,
                 "termination_reason": "process_exit", "task_wall_clock_ms": 1,
             })
+            verify = mock.Mock(return_value=cli_identity)
             with self.assertRaisesRegex(ValueError, "first command.*expectation"):
                 codex_automation.execute_run_row(
-                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    args, verify_cli=verify, materialize=materialize,
                     process_runner=process, json_parser=mock.Mock(return_value=parsed),
                 )
+            verify.assert_not_called()
             process.assert_not_called()
             materialize.assert_not_called()
             self.assertTrue(profile.exists())

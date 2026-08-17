@@ -639,6 +639,9 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
                         if field == "exit_code":
                             if field in item:
                                 summary[field] = value
+                        elif field == "command":
+                            if kind == "item.started" and isinstance(value, str) and value:
+                                summary.setdefault(field, value)
                         elif isinstance(value, str) and value:
                             summary.setdefault(field, value)
                 else:
@@ -1180,7 +1183,6 @@ def execute_run_row(
     json_parser=parse_cli_jsonl,
 ) -> dict:
     args.evidence_root = ensure_external_evidence_root(args.evidence_root)
-    cli_identity = verify_cli(args.codex, args.codex_version, args.codex_sha256)
     skill_hash = sha256_file(args.skill_path)
     mcp_hash = sha256_file(args.mcp_path)
     if skill_hash.casefold() != args.skill_sha256.casefold():
@@ -1190,6 +1192,7 @@ def execute_run_row(
     row = load_manifest_row(args.manifest, args.sequence)
     validate_manifest_row_paths(args.manifest, row)
     validate_first_command_expectation(row)
+    cli_identity = verify_cli(args.codex, args.codex_version, args.codex_sha256)
     if row.get("arm") != args.arm:
         raise ValueError("requested arm does not match manifest row")
     prompt_path = pathlib.Path(row["prompt_path"])
