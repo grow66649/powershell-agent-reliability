@@ -238,6 +238,34 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         actual = "tools.shell_command({command:'helper.cmd'}"
         self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
 
+    def test_structured_wrapper_even_backslash_run_closes_field(self):
+        actual = r'tools.shell_command({command:"helper.cmd\\", justification:"x"})'
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_odd_backslash_run_preserves_literal_quote_identity(self):
+        actual = r'tools.shell_command({command:"not\\\"helper.cmd"})'
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_empty_metadata_values(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({justification:, command:'helper.cmd'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "tools.shell_command({command:'helper.cmd', justification:})"))
+
+    def test_quote_equivalence_rejects_colon_component_collision(self):
+        actual = r'pwsh.exe -File .\not:"helper.cmd"'
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_supports_observed_quoted_property_names(self):
+        actual = r'tools.shell_command({"justification":"do it","command":"helper.cmd"})'
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_shell_call_detection_ignores_wrapper_marker_inside_other_tool_string(self):
+        actual = 'tools.read_file({path:"literal tools.shell_command({ marker"})'
+        self.assertFalse(trigger_eval._is_shell_call(actual))
+
+    def test_shell_call_detection_ignores_wrapper_marker_inside_template_literal(self):
+        actual = 'tools.other({value:`literal tools.shell_command({ marker`})'
+        self.assertFalse(trigger_eval._is_shell_call(actual))
+
 
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):

@@ -20,7 +20,10 @@ VALID_GROUPS = {"should_trigger", "should_not_trigger", "boundary"}
 
 
 def _is_shell_call(call_input: str) -> bool:
-    return any(name in call_input for name in SHELL_CALLS)
+    if not isinstance(call_input, str) or not call_input:
+        return False
+    recognized, _ = _structured_tool_command(call_input)
+    return recognized
 
 
 def _sha256_text(value: str) -> str:
@@ -203,7 +206,7 @@ def _norm_command(value: str | None) -> str:
 
 
 _COMMAND_FRAGMENT_BOUNDARIES = set("\\/\"'()[]{};,&|<>")
-_QUOTE_OPEN_BOUNDARIES = set(":({[,;|&<>")
+_QUOTE_OPEN_BOUNDARIES = set("({[,;|&<>")
 
 
 def _command_component_char(value: str) -> bool:
@@ -236,7 +239,7 @@ def _find_structured_tool_start(value: str):
                 quote = None
             index += 1
             continue
-        if char in {"\"", "'"}:
+        if char in {"\"", "'", "`"}:
             quote = char
             quote_start = index + 1
             index += 1
@@ -250,22 +253,44 @@ def _find_structured_tool_start(value: str):
 
 def _consume_quoted_string(value: str, index: int) -> tuple[str, int] | None:
     quote = value[index]
-    start = index + 1
-    cursor = start
+    cursor = index + 1
     decoded: list[str] = []
-    segment_start = start
     while cursor < len(value):
-        if value[cursor] == "\\" and cursor + 1 < len(value) and value[cursor + 1] == quote:
-            decoded.append(value[segment_start:cursor])
-            decoded.append(quote)
-            cursor += 2
-            segment_start = cursor
-            continue
-        if value[cursor] == quote and not _quote_is_escaped(value, cursor, start):
-            decoded.append(value[segment_start:cursor])
+        char = value[cursor]
+        if char == quote:
             return "".join(decoded), cursor + 1
-        cursor += 1
+        if char != "\\":
+            decoded.append(char)
+            cursor += 1
+            continue
+        run_start = cursor
+        while cursor < len(value) and value[cursor] == "\\":
+            cursor += 1
+        backslashes = cursor - run_start
+        if cursor < len(value) and value[cursor] == quote:
+            decoded.append("\\" * (backslashes // 2))
+            if backslashes % 2 == 0:
+                return "".join(decoded), cursor + 1
+            decoded.append(quote)
+            cursor += 1
+            continue
+        decoded.append("\\" * backslashes)
     return None
+
+
+def _consume_structured_key(value: str, index: int) -> tuple[str, int] | None:
+    if index >= len(value):
+        return None
+    if value[index] in {"\"", "'"}:
+        parsed = _consume_quoted_string(value, index)
+        if parsed is None:
+            return None
+        key, index = parsed
+        return key.lower(), index
+    match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", value[index:])
+    if match is None:
+        return None
+    return match.group(0).lower(), index + len(match.group(0))
 
 
 def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
@@ -273,6 +298,7 @@ def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
     quote_start = index
     stack: list[str] = []
     closers = {"(": ")", "[": "]", "{": "}"}
+    started = False
     while index < len(value):
         char = value[index]
         if quote is not None:
@@ -280,10 +306,15 @@ def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
                 quote = None
             index += 1
             continue
-        if char in {"\"", "'"}:
+        if char.isspace():
+            index += 1
+            continue
+        if char in {"\"", "'", "`"}:
+            started = True
             quote = char
             quote_start = index + 1
         elif char in closers:
+            started = True
             stack.append(closers[char])
         elif char in {")", "]", "}"}:
             if stack:
@@ -291,11 +322,13 @@ def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
                     return None
                 stack.pop()
             elif char == "}":
-                return index, char
+                return (index, char) if started else None
             else:
                 return None
         elif char == "," and not stack:
-            return index, char
+            return (index, char) if started else None
+        else:
+            started = True
         index += 1
     return None
 
@@ -320,11 +353,10 @@ def _structured_tool_command(value: str) -> tuple[bool, str | None]:
             if index >= len(value) or value[index] != ")":
                 return True, None
             return True, command if command_seen else None
-        key_match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", value[index:])
-        if key_match is None:
+        parsed_key = _consume_structured_key(value, index)
+        if parsed_key is None:
             return True, None
-        key = key_match.group(0).lower()
-        index += len(key_match.group(0))
+        key, index = parsed_key
         while index < len(value) and value[index].isspace():
             index += 1
         if index >= len(value) or value[index] != ":":
@@ -346,7 +378,6 @@ def _structured_tool_command(value: str) -> tuple[bool, str | None]:
                 return True, None
             if value[index] == ",":
                 index += 1
-                continue
             continue
         boundary = _skip_structured_value(value, index)
         if boundary is None:
@@ -357,29 +388,33 @@ def _structured_tool_command(value: str) -> tuple[bool, str | None]:
             continue
     return True, None
 
-def _command_match_candidates(value: str | None) -> list[str]:
-    if not isinstance(value, str) or not value:
-        return []
-    recognized, command = _structured_tool_command(value)
-    if recognized:
-        return [command] if command is not None else []
-    return [value]
 
 def _left_fragment_boundary(command: str, index: int) -> bool:
     cursor = index - 1
+    skipped_quote = False
     while cursor >= 0 and command[cursor] in {"\"", "'"}:
+        skipped_quote = True
         cursor -= 1
     if cursor < 0:
         return True
     previous = command[cursor]
-    return previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES or not _command_component_char(previous)
+    if skipped_quote:
+        return previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES
+    return previous.isspace() or not _command_component_char(previous)
 
 
 def _right_fragment_boundary(command: str, end: int) -> bool:
     cursor = end
+    skipped_quote = False
     while cursor < len(command) and command[cursor] in {"\"", "'"}:
+        skipped_quote = True
         cursor += 1
-    return cursor >= len(command) or not _command_component_char(command[cursor])
+    if cursor >= len(command):
+        return True
+    following = command[cursor]
+    if skipped_quote:
+        return following.isspace() or following in ")}],;|&<>"
+    return not _command_component_char(following)
 
 
 def _cmd_c_single_token_quote_variant(fragment: str) -> str | None:
@@ -413,19 +448,25 @@ def _normalized_fragment_matches(fragment: str, command: str) -> bool:
         start = index + 1
 
 
-def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
+def raw_command_fragment_matches(expected: str | None, actual: str | None) -> bool:
     fragment = _norm_command(expected)
-    if not fragment:
+    command = _norm_command(actual)
+    if not fragment or not command:
         return False
     fragments = [fragment]
     quote_variant = _cmd_c_single_token_quote_variant(fragment)
     if quote_variant is not None:
         fragments.append(quote_variant)
-    for candidate in _command_match_candidates(actual):
-        command = _norm_command(candidate)
-        if command and any(_normalized_fragment_matches(item, command) for item in fragments):
-            return True
-    return False
+    return any(_normalized_fragment_matches(item, command) for item in fragments)
+
+
+def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
+    if not isinstance(actual, str) or not actual:
+        return False
+    recognized, command = _structured_tool_command(actual)
+    if recognized:
+        return command is not None and raw_command_fragment_matches(expected, command)
+    return raw_command_fragment_matches(expected, actual)
 
 
 def attach_manifest(records: list[dict], manifest: list[dict]) -> list[dict]:
