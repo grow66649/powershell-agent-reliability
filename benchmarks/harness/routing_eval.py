@@ -216,7 +216,14 @@ def _prepare_campaign_impl(
     output_root = output_root.resolve(strict=False)
     runtime_parent = (runtime_parent or pathlib.Path(tempfile.gettempdir())).resolve(strict=False)
     campaign_token = _opaque_token(token_factory)
-    runtime_root = (runtime_parent / campaign_token).resolve(strict=False)
+    raw_runtime_root = runtime_parent / campaign_token
+    if _path_is_link_or_junction(raw_runtime_root):
+        raise ValueError("runtime root must not be a symlink or junction")
+    if raw_runtime_root.exists():
+        raise ValueError("opaque runtime root must be new and empty")
+    runtime_root = raw_runtime_root.resolve(strict=False)
+    if runtime_root.parent != runtime_parent:
+        raise ValueError("runtime root must remain a direct child of the neutral runtime parent")
     if _path_is_relative_to(runtime_root, output_root) or _path_is_relative_to(output_root, runtime_root):
         raise ValueError("coordinator and runtime roots must be disjoint")
     prompts_dir = output_root / "prompts"
@@ -331,9 +338,9 @@ def prepare_campaign(
         value = actual_factory()
         state["tokens"].append(value)
         if len(state["tokens"]) == 1 and isinstance(value, str) and OPAQUE_TOKEN_RE.fullmatch(value):
-            runtime_root = (resolved_runtime_parent / value).resolve(strict=False)
+            runtime_root = resolved_runtime_parent / value
             state["runtime_root"] = runtime_root
-            state["runtime_root_existed"] = runtime_root.exists()
+            state["runtime_root_existed"] = runtime_root.exists() or _path_is_link_or_junction(runtime_root)
         return value
 
     try:

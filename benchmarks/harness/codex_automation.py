@@ -1081,17 +1081,21 @@ def execute_run_row(
             args.identity_lock, identity, allow_create=False
         )
         output_dir.mkdir(parents=True)
-        process_result = process_runner(
-            args.codex, workspace, profile, prompt_bytes,
-            output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout,
-            model=args.model,
-        )
+        try:
+            process_result = process_runner(
+                args.codex, workspace, profile, prompt_bytes,
+                output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout,
+                model=args.model,
+            )
+        except Exception:
+            evaluate_manifest_row(row, workspace)
+            raise
+        post_condition = evaluate_manifest_row(row, workspace)
         parsed = json_parser(
             output_dir / "stdout.jsonl",
             allow_truncated_tail=bool(process_result.get("timed_out")),
         )
         validate_cli_terminal_state(process_result, parsed)
-        post_condition = evaluate_manifest_row(row, workspace)
         manifest_rows = routing_eval.trigger_eval.load_jsonl(args.manifest)
         contamination_evidence = detect_campaign_contamination(
             parsed, manifest_rows, row, args.manifest.parent

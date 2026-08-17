@@ -1021,13 +1021,19 @@ class RunRowWorkflowTests(unittest.TestCase):
     def test_execute_run_row_cleans_workspace_and_profile_when_parser_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            row, args, profile, materialize, cli_identity = self._prepared_run(root)
-            process = mock.Mock(return_value={"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1})
-            with self.assertRaisesRegex(ValueError, "malformed"):
-                codex_automation.execute_run_row(
-                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
-                    process_runner=process, json_parser=mock.Mock(side_effect=ValueError("malformed CLI JSONL")),
-                )
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                (workspace / "result.txt").write_text("READY\n", encoding="utf-8", newline="\n")
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            evaluate = mock.Mock(side_effect=codex_automation.evaluate_manifest_row)
+            with mock.patch.object(codex_automation, "evaluate_manifest_row", evaluate):
+                with self.assertRaisesRegex(ValueError, "malformed"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process_runner, json_parser=mock.Mock(side_effect=ValueError("malformed CLI JSONL")),
+                    )
+            evaluate.assert_called_once()
             self.assertFalse(profile.exists())
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
             self.assertEqual(list(pathlib.Path(row["runtime_root"]).iterdir()), [])
@@ -1035,12 +1041,19 @@ class RunRowWorkflowTests(unittest.TestCase):
     def test_execute_run_row_cleans_workspace_and_profile_when_process_raises(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            row, args, profile, materialize, cli_identity = self._prepared_run(root)
-            with self.assertRaisesRegex(RuntimeError, "launch failed"):
-                codex_automation.execute_run_row(
-                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
-                    process_runner=mock.Mock(side_effect=RuntimeError("launch failed")),
-                )
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                (workspace / "result.txt").write_text("READY\n", encoding="utf-8", newline="\n")
+                raise RuntimeError("launch failed")
+            evaluate = mock.Mock(side_effect=codex_automation.evaluate_manifest_row)
+            with mock.patch.object(codex_automation, "evaluate_manifest_row", evaluate):
+                with self.assertRaisesRegex(RuntimeError, "launch failed"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process_runner,
+                    )
+            evaluate.assert_called_once()
             self.assertFalse(profile.exists())
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
             self.assertEqual(list(pathlib.Path(row["runtime_root"]).iterdir()), [])

@@ -88,6 +88,30 @@ class RoutingEvalPrepareTests(unittest.TestCase):
                     )
             self.assertEqual(prompt_path.read_text(encoding="utf-8"), "preserve")
 
+    def test_prepare_campaign_rejects_linked_runtime_root_before_resolve(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            runtime_parent = root / "neutral"
+            runtime_parent.mkdir()
+            raw_runtime_root = runtime_parent / ("a" * 32)
+            tokens = iter(["a" * 32, "b" * 32, "c" * 32])
+            real_resolve = pathlib.Path.resolve
+            real_link_check = routing_eval._path_is_link_or_junction
+            def fake_resolve(path, strict=False):
+                if path == raw_runtime_root:
+                    raise AssertionError("linked runtime root must be rejected before resolve")
+                return real_resolve(path, strict=strict)
+            def fake_link_check(path):
+                return path == raw_runtime_root or real_link_check(path)
+            with mock.patch.object(pathlib.Path, "resolve", autospec=True, side_effect=fake_resolve):
+                with mock.patch.object(routing_eval, "_path_is_link_or_junction", side_effect=fake_link_check):
+                    with self.assertRaisesRegex(ValueError, "runtime root.*symlink|junction"):
+                        routing_eval.prepare_campaign(
+                            [_case()], coordinator, trials=1, seed=7,
+                            runtime_parent=runtime_parent, token_factory=lambda: next(tokens),
+                        )
+
     def test_prepare_campaign_rejects_runtime_parent_inside_coordinator(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
