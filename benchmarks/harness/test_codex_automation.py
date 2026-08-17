@@ -70,6 +70,13 @@ class ProfileMaterializerTests(unittest.TestCase):
         self.assertNotIn('[model_providers.openai]', text)
         self.assertIn('[mcp_servers.psr_reliability_native]', text)
 
+    def test_build_profile_rejects_malformed_builtin_openai_provider_table(self):
+        live = _live_config()
+        live["model_provider"] = "openai"
+        live["model_providers"] = {"openai": "not-a-table"}
+        with self.assertRaisesRegex(ValueError, "selected model provider table is missing"):
+            codex_automation.build_profile_text(live, "S", PSR_SKILL, PSR_MCP)
+
     def test_build_profile_still_requires_table_for_custom_provider(self):
         live = _live_config()
         live.pop("model_providers")

@@ -290,11 +290,17 @@ def build_profile_text(
     if arm not in {"S", "M"}:
         raise ValueError("arm must be S or M")
     provider_name = live.get("model_provider")
-    provider = (live.get("model_providers") or {}).get(provider_name)
-    if not isinstance(provider, dict):
+    provider_tables = live.get("model_providers")
+    if provider_tables is None or (isinstance(provider_tables, dict) and provider_name not in provider_tables):
         if provider_name != "openai":
             raise ValueError("selected model provider table is missing")
         provider = None
+    else:
+        if not isinstance(provider_tables, dict):
+            raise ValueError("selected model provider table is missing")
+        provider = provider_tables.get(provider_name)
+        if not isinstance(provider, dict):
+            raise ValueError("selected model provider table is missing")
     mcp = (live.get("mcp_servers") or {}).get("psr_reliability_native")
     if not isinstance(mcp, dict):
         raise ValueError("psr_reliability_native MCP config is missing")
