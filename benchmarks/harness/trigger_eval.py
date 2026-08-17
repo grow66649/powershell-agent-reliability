@@ -185,13 +185,54 @@ def extract_rollout(
     }
 
 
+def validate_expected_first_command_fragment(value) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("expected first command fragment must be a non-empty string")
+    return value
+
+
 def _norm_command(value: str | None) -> str:
     if value is None:
         return ""
-    normalized = value.lower()
+    normalized = value.lower().replace("/", "\\")
     while "\\\\" in normalized:
         normalized = normalized.replace("\\\\", "\\")
     return " ".join(normalized.split())
+
+
+_COMMAND_FRAGMENT_BOUNDARIES = set("\\/\"'()[]{};,&|<>")
+
+
+def _command_component_char(value: str) -> bool:
+    return not value.isspace() and value not in _COMMAND_FRAGMENT_BOUNDARIES
+
+
+def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
+    fragment = _norm_command(expected)
+    command = _norm_command(actual)
+    if not fragment or not command:
+        return False
+    start = 0
+    while True:
+        index = command.find(fragment, start)
+        if index < 0:
+            return False
+        end = index + len(fragment)
+        left_ok = (
+            not _command_component_char(fragment[0])
+            or index == 0
+            or not _command_component_char(command[index - 1])
+        )
+        right_ok = (
+            not _command_component_char(fragment[-1])
+            or end == len(command)
+            or not _command_component_char(command[end])
+        )
+        if left_ok and right_ok:
+            return True
+        start = index + 1
 
 
 def attach_manifest(records: list[dict], manifest: list[dict]) -> list[dict]:
@@ -204,10 +245,10 @@ def attach_manifest(records: list[dict], manifest: list[dict]) -> list[dict]:
         row = dict(record)
         for key in ("case_id", "trial_id", "group", "title", "sequence", "expected_first_command_fragment"):
             row[key] = meta.get(key)
-        expected = meta.get("expected_first_command_fragment")
+        expected = validate_expected_first_command_fragment(meta.get("expected_first_command_fragment"))
         command_input = record.get("first_command_input")
-        if expected:
-            row["first_command_matches_expectation"] = _norm_command(expected) in _norm_command(command_input)
+        if expected is not None:
+            row["first_command_matches_expectation"] = command_fragment_matches(expected, command_input)
         else:
             row["first_command_matches_expectation"] = None
         row["first_command_input_sha256"] = _sha256_text(command_input) if command_input else None
@@ -217,6 +258,8 @@ def attach_manifest(records: list[dict], manifest: list[dict]) -> list[dict]:
 
 
 def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[dict]:
+    for row in manifest:
+        validate_expected_first_command_fragment(row.get("expected_first_command_fragment"))
     known = {row["case_key"] for row in manifest}
     records = []
     seen = set()
@@ -345,12 +388,15 @@ def load_cases(path: pathlib.Path) -> list[dict]:
             raise ValueError(f"invalid group for {case.get('case_id')}")
         if "prompt" not in case or "title" not in case:
             raise ValueError(f"case {case.get('case_id')} missing title or prompt")
+        validate_expected_first_command_fragment(case.get("expected_first_command_fragment"))
     return value
 
 
 def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, seed: int) -> list[dict]:
     if trials < 1:
         raise ValueError("trials must be at least 1")
+    for case in cases:
+        validate_expected_first_command_fragment(case.get("expected_first_command_fragment"))
     prompts_dir = output_root / "prompts"
     workspaces_dir = output_root / "workspaces"
     prompts_dir.mkdir(parents=True, exist_ok=True)

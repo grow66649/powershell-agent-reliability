@@ -639,8 +639,11 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
                         if field == "exit_code":
                             if field in item:
                                 summary[field] = value
+                        elif field == "command":
+                            if kind == "item.started" and isinstance(value, str) and value:
+                                summary.setdefault(field, value)
                         elif isinstance(value, str) and value:
-                            summary[field] = value
+                            summary.setdefault(field, value)
                 else:
                     for field in ("server", "tool"):
                         if field in item:
@@ -681,6 +684,27 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
         "final_message": final_message,
         "errors": [item for item in errors if item],
     }
+
+
+def validate_first_command_expectation(row: dict) -> str | None:
+    expected = row.get("expected_first_command_fragment")
+    if expected is None:
+        return None
+    if not isinstance(expected, str) or not expected.strip():
+        raise ValueError("manifest first command expectation must be a non-empty string")
+    return expected
+
+
+def validate_expected_first_command(row: dict, parsed: dict) -> None:
+    expected = validate_first_command_expectation(row)
+    if expected is None:
+        return
+    commands = parsed.get("commands") or []
+    if not commands or not isinstance(commands[0].get("command"), str):
+        raise ValueError("manifest first command missing")
+    actual = commands[0]["command"]
+    if not routing_eval.trigger_eval.command_fragment_matches(expected, actual):
+        raise ValueError("manifest first command mismatch")
 
 
 def _known_path_sha256(value: pathlib.Path | str) -> str:
@@ -1159,7 +1183,6 @@ def execute_run_row(
     json_parser=parse_cli_jsonl,
 ) -> dict:
     args.evidence_root = ensure_external_evidence_root(args.evidence_root)
-    cli_identity = verify_cli(args.codex, args.codex_version, args.codex_sha256)
     skill_hash = sha256_file(args.skill_path)
     mcp_hash = sha256_file(args.mcp_path)
     if skill_hash.casefold() != args.skill_sha256.casefold():
@@ -1168,6 +1191,8 @@ def execute_run_row(
         raise ValueError("Reliability MCP SHA256 mismatch")
     row = load_manifest_row(args.manifest, args.sequence)
     validate_manifest_row_paths(args.manifest, row)
+    validate_first_command_expectation(row)
+    cli_identity = verify_cli(args.codex, args.codex_version, args.codex_sha256)
     if row.get("arm") != args.arm:
         raise ValueError("requested arm does not match manifest row")
     prompt_path = pathlib.Path(row["prompt_path"])
@@ -1227,6 +1252,7 @@ def execute_run_row(
             allow_truncated_tail=bool(process_result.get("timed_out")),
         )
         validate_cli_terminal_state(process_result, parsed)
+        validate_expected_first_command(row, parsed)
         manifest_rows = routing_eval.trigger_eval.load_jsonl(args.manifest)
         contamination_evidence = detect_campaign_contamination(
             parsed, manifest_rows, row, args.manifest.parent

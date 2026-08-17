@@ -136,6 +136,11 @@ def _validate_case(case: dict) -> None:
         raise ValueError(f"case {case['case_id']} missing prompt")
     if "{workspace}" in case["prompt"]:
         raise ValueError("routing prompts must not contain {workspace}")
+    expected_first_command = case.get("expected_first_command_fragment")
+    if expected_first_command is not None and (
+        not isinstance(expected_first_command, str) or not expected_first_command.strip()
+    ):
+        raise ValueError("expected first command fragment must be a non-empty string")
     detector = case.get("boundary_detector")
     if not isinstance(detector, dict) or detector.get("kind") not in BOUNDARY_KINDS:
         raise ValueError(f"invalid boundary detector for {case['case_id']}")
@@ -612,10 +617,12 @@ def extract_trial(rows: list[dict], rollout_path: pathlib.Path, manifest_row: di
         invalid_reasons.append("arm_catalog_unobserved")
     elif (manifest_row["arm"] == "S") != psr_visible:
         invalid_reasons.append("arm_catalog_mismatch")
-    expected = manifest_row.get("expected_first_command_fragment")
-    if expected:
+    expected = trigger_eval.validate_expected_first_command_fragment(
+        manifest_row.get("expected_first_command_fragment")
+    )
+    if expected is not None:
         actual = first_command.get("input") if first_command else None
-        if trigger_eval._norm_command(expected) not in trigger_eval._norm_command(actual):
+        if not trigger_eval.command_fragment_matches(expected, actual):
             invalid_reasons.append("first_command_mismatch")
     premature = boundary_index is not None and any(index < boundary_index for index in skill_indexes)
     pre_boundary_mcp = (
@@ -701,6 +708,9 @@ def _malformed_rollout_cwd(path: pathlib.Path) -> str | None:
 def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[dict]:
     manifest_index = {}
     for row in manifest:
+        trigger_eval.validate_expected_first_command_fragment(
+            row.get("expected_first_command_fragment")
+        )
         key = row["workspace_sha256"]
         if key in manifest_index:
             raise ValueError(f"duplicate manifest workspace binding {key}")

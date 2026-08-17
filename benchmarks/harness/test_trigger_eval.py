@@ -88,6 +88,33 @@ class TriggerEvalCampaignTests(unittest.TestCase):
             self.assertEqual(len(list((root / "prompts").glob("*.txt"))), 6)
             self.assertTrue(any((root / "workspaces" / row["case_key"] / "task.ps1").is_file() for row in manifest if row["case_id"] == "C01"))
 
+    def test_prepare_campaign_rejects_blank_expected_first_command_fragment(self):
+        cases = [{
+            "case_id": "C01", "group": "should_trigger", "title": "failure",
+            "prompt": "Run in {workspace}.\n[CASE-ID: {case_key}]", "files": {},
+            "expected_first_command_fragment": "   ",
+        }]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "first command"):
+                trigger_eval.prepare_campaign(cases, pathlib.Path(temp_dir), trials=1, seed=7)
+
+    def test_attach_manifest_rejects_malformed_first_command_expectation(self):
+        record = {"case_key": "C01-T01", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": [], "first_command_input": "tools.shell_command pwsh.exe"}
+        for value in ("   ", 123):
+            with self.subTest(value=value):
+                manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": value}]
+                with self.assertRaisesRegex(ValueError, "first command"):
+                    trigger_eval.attach_manifest([record], manifest)
+
+    def test_collect_rejects_malformed_manifest_expectation_without_rollout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            for value in ("   ", 123):
+                with self.subTest(value=value):
+                    manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": value}]
+                    with self.assertRaisesRegex(ValueError, "first command"):
+                        trigger_eval.collect_rollouts(root, manifest)
+
     def test_attach_manifest_labels_collected_records(self):
         manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": "pwsh.exe"}]
         record = {"case_key": "C01-T01", "psr_skill_selected": True, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 1, "selected_other_skills": [], "first_command_input": "tools.shell_command pwsh.exe"}
@@ -95,9 +122,36 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertEqual(attached[0]["group"], "should_trigger")
         self.assertTrue(attached[0]["first_command_matches_expectation"])
 
+    def test_attach_manifest_rejects_near_first_command_fragment_collision(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": "helper.cmd"}]
+        record = {"case_key": "C01-T01", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": [], "first_command_input": r"tools.shell_command pwsh.exe .\not-helper.cmd"}
+        attached = trigger_eval.attach_manifest([record], manifest)
+        self.assertFalse(attached[0]["first_command_matches_expectation"])
+
+    def test_attach_manifest_accepts_windows_path_separator_variant(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": r"app\build.ps1"}]
+        record = {"case_key": "C01-T01", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": [], "first_command_input": "tools.shell_command pwsh.exe -File ./app/build.ps1"}
+        attached = trigger_eval.attach_manifest([record], manifest)
+        self.assertTrue(attached[0]["first_command_matches_expectation"])
+
+    def test_attach_manifest_rejects_windows_component_character_collisions(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": "helper.cmd"}]
+        for command in (r"tools.shell_command pwsh.exe .\not+helper.cmd", r"tools.shell_command pwsh.exe .\not~helper.cmd"):
+            with self.subTest(command=command):
+                record = {"case_key": "C01-T01", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": [], "first_command_input": command}
+                attached = trigger_eval.attach_manifest([record], manifest)
+                self.assertFalse(attached[0]["first_command_matches_expectation"])
 
 
 class TriggerEvalDatasetContractTests(unittest.TestCase):
+    def test_load_cases_rejects_malformed_first_command_expectation(self):
+        case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "cases.json"
+            path.write_text(json.dumps([case]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "first command"):
+                trigger_eval.load_cases(path)
+
     def test_repository_dataset_has_balanced_implicit_groups(self):
         cases_path = pathlib.Path(__file__).resolve().parents[1] / "trigger_eval" / "cases.json"
         cases = trigger_eval.load_cases(cases_path)
