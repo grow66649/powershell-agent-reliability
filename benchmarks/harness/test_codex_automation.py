@@ -621,6 +621,30 @@ class MaterializeProfileTests(unittest.TestCase):
             finally:
                 codex_automation.remove_profile(profile)
 
+    def test_materialize_profile_copies_builtin_openai_auth_into_disposable_profile(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            live = _live_config()
+            live["model_provider"] = "openai"
+            live["model"] = "gpt-5.6-luna"
+            live["model_reasoning_effort"] = "high"
+            live.pop("model_providers")
+            live_path = root / "config.toml"
+            live_path.write_text(codex_automation.build_profile_text(live, "S", PSR_SKILL, PSR_MCP), encoding="utf-8")
+            auth_bytes = b'{"OPENAI_API_KEY":"secret-test-value"}'
+            (root / "auth.json").write_bytes(auth_bytes)
+            probes = iter([[{"name": "powershell-reliability", "path": PSR_SKILL}], [{"name": "powershell-reliability", "path": PSR_SKILL}]])
+            profile, _, _, _ = codex_automation.materialize_profile(
+                live_path, "S", pathlib.Path(PSR_SKILL), pathlib.Path(PSR_MCP), pathlib.Path("C:/Codex/codex.exe"),
+                temp_parent=root, acl_func=mock.Mock(), skill_probe=mock.Mock(side_effect=lambda *_: next(probes)),
+                mcp_probe=mock.Mock(return_value=[{"name": "psr_reliability_native", "enabled": True, "transport": {"type": "stdio", "command": PSR_MCP, "args": []}}]),
+            )
+            try:
+                self.assertEqual((profile / "auth.json").read_bytes(), auth_bytes)
+            finally:
+                codex_automation.remove_profile(profile)
+            self.assertFalse((profile / "auth.json").exists())
+
     def test_materialize_profile_cleans_fresh_profile_when_identity_capture_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
