@@ -203,11 +203,46 @@ def _norm_command(value: str | None) -> str:
 
 
 _COMMAND_FRAGMENT_BOUNDARIES = set("\\/\"'()[]{};,&|<>")
-_QUOTE_OPEN_BOUNDARIES = set(":=({[,;|&<>")
+_QUOTE_OPEN_BOUNDARIES = set(":({[,;|&<>")
 
 
 def _command_component_char(value: str) -> bool:
     return not value.isspace() and value not in _COMMAND_FRAGMENT_BOUNDARIES
+
+
+_STRUCTURED_TOOL_COMMAND_RE = re.compile(
+    r"tools\.(?:shell_command\s*\(\{\s*command|exec_command\s*\(\{\s*cmd)\s*:\s*([\"'])",
+    re.IGNORECASE,
+)
+
+
+def _structured_tool_command(value: str) -> str | None:
+    match = _STRUCTURED_TOOL_COMMAND_RE.search(value)
+    if match is None:
+        return None
+    quote = match.group(1)
+    start = match.end()
+    index = start
+    while index < len(value):
+        if value[index] == quote:
+            backslashes = 0
+            cursor = index - 1
+            while cursor >= start and value[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            if backslashes % 2 == 0:
+                return value[start:index]
+        index += 1
+    return None
+
+
+def _command_match_candidates(value: str | None) -> list[str]:
+    if not isinstance(value, str) or not value:
+        return []
+    if re.search(r"tools\.(?:shell_command|exec_command)\s*\(\{", value, re.IGNORECASE):
+        command = _structured_tool_command(value)
+        return [command] if command is not None else []
+    return [value]
 
 
 def _left_fragment_boundary(command: str, index: int) -> bool:
@@ -230,21 +265,12 @@ def _cmd_c_single_token_quote_variant(fragment: str) -> str | None:
     return prefix + '"' + tail
 
 
-def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
-    fragment = _norm_command(expected)
-    command = _norm_command(actual)
-    quote_variant = _cmd_c_single_token_quote_variant(fragment)
-    if not fragment or not command:
-        return False
+def _normalized_fragment_matches(fragment: str, command: str) -> bool:
     start = 0
     while True:
         index = command.find(fragment, start)
         if index < 0:
-            if quote_variant is None:
-                return False
-            fragment, quote_variant = quote_variant, None
-            start = 0
-            continue
+            return False
         end = index + len(fragment)
         left_ok = (
             not _command_component_char(fragment[0])
@@ -259,6 +285,21 @@ def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
         if left_ok and right_ok:
             return True
         start = index + 1
+
+
+def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
+    fragment = _norm_command(expected)
+    if not fragment:
+        return False
+    fragments = [fragment]
+    quote_variant = _cmd_c_single_token_quote_variant(fragment)
+    if quote_variant is not None:
+        fragments.append(quote_variant)
+    for candidate in _command_match_candidates(actual):
+        command = _norm_command(candidate)
+        if command and any(_normalized_fragment_matches(item, command) for item in fragments):
+            return True
+    return False
 
 
 def attach_manifest(records: list[dict], manifest: list[dict]) -> list[dict]:

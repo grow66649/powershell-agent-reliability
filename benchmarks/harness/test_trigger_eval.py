@@ -186,6 +186,19 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c echo ab", actual))
 
 
+    def test_quote_equivalence_ignores_quoted_cmd_text_in_wrapper_justification(self):
+        actual = "tools.shell_command({command:'echo wrong', justification:'run cmd.exe /d /c \"ver > native-version.txt\"'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_quote_equivalence_rejects_equals_component_collision(self):
+        actual = "tools.shell_command({command:'pwsh.exe -File .\\not=\"helper.cmd\"'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_command_field_still_matches(self):
+        actual = "tools.shell_command({command:'helper.cmd', justification:'do it'})"
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):
         case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}
