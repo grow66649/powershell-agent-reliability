@@ -772,14 +772,15 @@ class CampaignIdentityLockTests(unittest.TestCase):
 
 
 class RunRowWorkflowTests(unittest.TestCase):
-    def _prepared_run(self, root, post_condition=None):
+    def _prepared_run(self, root, post_condition=None, expected_first_command_fragment=None, group="should_not_trigger", boundary_detector=None):
         coordinator = root / "coordinator"
         tokens = iter(["1" * 32, "2" * 32, "3" * 32])
         rows = codex_automation.routing_eval.prepare_campaign(
             [{
-                "case_id": "X1", "lane": "train", "group": "should_not_trigger",
-                "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                "case_id": "X1", "lane": "train", "group": group,
+                "prompt": "do task", "boundary_detector": boundary_detector or {"kind": "none"}, "files": {},
                 "post_condition": post_condition or {"kind": "none"},
+                "expected_first_command_fragment": expected_first_command_fragment,
             }],
             coordinator, trials=1, seed=7, runtime_parent=root / "neutral",
             token_factory=lambda: next(tokens),
@@ -797,6 +798,87 @@ class RunRowWorkflowTests(unittest.TestCase):
         codex_automation.verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=True)
         return row, args, profile, materialize, cli_identity
 
+    def _parsed_run(self, command=None):
+        commands = []
+        if command is not None:
+            commands.append({
+                "id": "c1", "type": "command_execution", "command": command,
+                "started_event_index": 3, "completed_event_index": 4,
+                "terminal_status": "completed", "exit_code": 0,
+            })
+        return {
+            "thread_id": "t", "turn_status": "completed",
+            "native_command_count": len(commands), "incomplete_native_command_count": 0,
+            "mcp_call_count": 0, "incomplete_mcp_call_count": 0,
+            "reliability_mcp_call_count": 0, "commands": commands, "mcp_calls": [],
+            "truncated_jsonl_tail": False,
+            "tokens": {name: None for name in codex_automation.TOKEN_FIELDS},
+            "final_message": "done", "errors": [],
+        }
+
+    def test_execute_run_row_rejects_first_command_mismatch_and_cleans_up(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(
+                root, expected_first_command_fragment="check-config.ps1",
+            )
+            raw_command = 'pwsh.exe -Command "git status --short --branch -uall"'
+            parsed = self._parsed_run(raw_command)
+            process = mock.Mock(return_value={
+                "exit_code": 0, "timed_out": False,
+                "termination_reason": "process_exit", "task_wall_clock_ms": 1,
+            })
+            with self.assertRaisesRegex(ValueError, "first command.*mismatch") as caught:
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                )
+            self.assertNotIn(raw_command, str(caught.exception))
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+            receipt_path = args.evidence_root / f"{row['sequence']:04d}-{row['case_key']}-M" / "receipt.json"
+            self.assertFalse(receipt_path.exists())
+
+    def test_execute_run_row_rejects_missing_expected_first_command_for_trigger_case(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(
+                root,
+                expected_first_command_fragment="generate.ps1",
+                group="should_trigger",
+                boundary_detector={"kind": "first_command_nonzero"},
+            )
+            parsed = self._parsed_run()
+            process = mock.Mock(return_value={
+                "exit_code": 0, "timed_out": False,
+                "termination_reason": "process_exit", "task_wall_clock_ms": 1,
+            })
+            with self.assertRaisesRegex(ValueError, "first command.*missing"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                )
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_accepts_normalized_first_command_fragment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(
+                root, expected_first_command_fragment=r"app\build.ps1",
+            )
+            parsed = self._parsed_run(r'"C:\Program Files\PowerShell\7\pwsh.exe" -Command ".\\app\\build.ps1"')
+            process = mock.Mock(return_value={
+                "exit_code": 0, "timed_out": False,
+                "termination_reason": "process_exit", "task_wall_clock_ms": 1,
+            })
+            receipt = codex_automation.execute_run_row(
+                args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                process_runner=process, json_parser=mock.Mock(return_value=parsed),
+            )
+            self.assertTrue(receipt["cleanup_ok"])
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
     def test_materialize_row_workspace_creates_only_active_fixture_and_preserves_crlf(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
