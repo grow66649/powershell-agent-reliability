@@ -442,6 +442,28 @@ class ContaminationDetectionTests(unittest.TestCase):
             "path_sha256": codex_automation._known_path_sha256(canonical),
         }])
 
+    def test_detect_campaign_contamination_resolves_relative_peer_workspace_from_command_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            campaign = "a" * 32
+            current_workspace = root / "runtime" / campaign / ("b" * 32)
+            other_workspace = root / "runtime" / campaign / ("c" * 32)
+            current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": str(current_workspace)}
+            other = {"case_id": "X1", "trial_id": "T01", "arm": "M", "workspace": str(other_workspace)}
+            parsed = {"commands": [{"id": "c1", "type": "command_execution", "cwd": str(current_workspace), "command": "Get-ChildItem '..\\" + ("c" * 32) + "'"}]}
+            evidence = codex_automation.detect_campaign_contamination(parsed, [current, other], current, root / "coordinator")
+        self.assertEqual([item["kind"] for item in evidence], ["other_row_workspace_access"])
+
+    def test_detect_campaign_contamination_resolves_relative_coordinator_from_command_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            current_workspace = root / "runtime" / ("a" * 32) / ("b" * 32)
+            coordinator = root / "coordinator"
+            current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": str(current_workspace)}
+            parsed = {"commands": [{"id": "c1", "type": "command_execution", "cwd": str(current_workspace), "command": "Get-ChildItem '..\\..\\..\\coordinator'"}]}
+            evidence = codex_automation.detect_campaign_contamination(parsed, [current], current, coordinator)
+        self.assertEqual([item["kind"] for item in evidence], ["coordinator_access"])
+
     def test_detect_campaign_contamination_reports_only_known_coordinator_or_other_row_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -551,6 +573,20 @@ class MaterializeProfileTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(live_path.read_bytes()).hexdigest().upper(), before)
             finally:
                 codex_automation.remove_profile(profile)
+
+    def test_materialize_profile_cleans_partial_profile_when_probe_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            live_path = root / "live.toml"
+            live_path.write_text(codex_automation.build_profile_text(_live_config(), "S", PSR_SKILL, PSR_MCP), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                codex_automation.materialize_profile(
+                    live_path, "S", pathlib.Path(PSR_SKILL), pathlib.Path(PSR_MCP), pathlib.Path("C:/Codex/codex.exe"),
+                    temp_parent=root, acl_func=mock.Mock(), skill_probe=mock.Mock(side_effect=RuntimeError("probe failed")),
+                    mcp_probe=mock.Mock(),
+                )
+            self.assertEqual(list(root.glob("psr-codex-profile-*")), [])
+
 
 
 class CommandWorkflowTests(unittest.TestCase):
@@ -1299,6 +1335,9 @@ class OperatorArtifactTests(unittest.TestCase):
         desktop_runbook = (repo / "docs" / "runbooks" / "routing-eval-desktop.md").read_text(encoding="utf-8")
         self.assertIn("prompt_sha256", desktop_runbook)
         self.assertIn("hashlib.sha256", desktop_runbook)
+        self.assertIn("capture_runtime_workspace_boundary", desktop_runbook)
+        self.assertGreaterEqual(desktop_runbook.count("validate_runtime_workspace_boundary"), 2)
+        self.assertIn("os.path.lexists", desktop_runbook)
 
     def test_verify_local_runs_and_compiles_automation_tests(self):
         repo = pathlib.Path(__file__).resolve().parents[2]

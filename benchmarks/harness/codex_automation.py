@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 import pathlib
 import re
@@ -680,6 +681,26 @@ def _text_mentions_windows_path(text: str, path: pathlib.Path | str) -> bool:
     return re.search(pattern, normalized_text) is not None
 
 
+def _command_mentions_known_path(command: dict, target: pathlib.Path | str) -> bool:
+    absolute_fields = [command.get("command"), command.get("cwd"), command.get("workdir")]
+    if any(_text_mentions_windows_path(value, target) for value in absolute_fields if isinstance(value, str)):
+        return True
+    command_text = command.get("command")
+    if not isinstance(command_text, str) or not command_text:
+        return False
+    target_text = str(target)
+    for base_value in (command.get("cwd"), command.get("workdir")):
+        if not isinstance(base_value, str) or not base_value or not ntpath.isabs(base_value):
+            continue
+        try:
+            relative = ntpath.relpath(target_text, start=base_value)
+        except ValueError:
+            continue
+        if relative not in {"", "."} and _text_mentions_windows_path(command_text, relative):
+            return True
+    return False
+
+
 def detect_campaign_contamination(
     parsed: dict,
     manifest_rows: list[dict],
@@ -715,9 +736,8 @@ def detect_campaign_contamination(
     seen = set()
     for command in parsed.get("commands") or []:
         command_id = command.get("id")
-        fields = [command.get("command"), command.get("cwd"), command.get("workdir")]
         for kind, target, path_sha256 in targets:
-            if not any(_text_mentions_windows_path(value, target) for value in fields if isinstance(value, str)):
+            if not _command_mentions_known_path(command, target):
                 continue
             identity = (kind, command_id, path_sha256)
             if identity in seen:

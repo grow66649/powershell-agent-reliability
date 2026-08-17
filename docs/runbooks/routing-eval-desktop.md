@@ -111,10 +111,10 @@ For every manifest row, keep the runtime root single-row and opaque:
 From the repository root, materialize exactly one row with the reviewed helper:
 
 ```powershell
-python -c "import hashlib,pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); codex_automation.validate_manifest_row_paths(m,r); p=pathlib.Path(r['prompt_path']); assert hashlib.sha256(p.read_bytes()).hexdigest().upper()==r['prompt_sha256'], 'prompt hash mismatch'; print(codex_automation.materialize_row_workspace(r))"
+python -c "import hashlib,json,pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); codex_automation.validate_manifest_row_paths(m,r); p=pathlib.Path(r['prompt_path']); assert hashlib.sha256(p.read_bytes()).hexdigest().upper()==r['prompt_sha256'], 'prompt hash mismatch'; w=codex_automation.materialize_row_workspace(r); b=codex_automation.capture_runtime_workspace_boundary(r,w); pathlib.Path(r'<host-local-current-row-boundary.json>').write_text(json.dumps({k:list(v) for k,v in b.items()})+'\n',encoding='utf-8'); print(w)"
 ```
 
-Do this immediately before the Desktop row. Do not use this helper to pre-create a batch.
+Do this immediately before the Desktop row. Do not use this helper to pre-create a batch. The boundary file is host-local evaluator state outside the runtime tree; keep one current-row boundary file because Desktop execution remains concurrency=1.
 
 Raw rollout evidence stays host-local. Do not copy full transcripts, credentials, full PATH/environment, or unrelated machine state into the repository.
 
@@ -122,7 +122,13 @@ Raw rollout evidence stays host-local. Do not copy full transcripts, credentials
 
 `workspace_state` is evaluator-owned final state, so collection must occur while the active row workspace still exists. Do not defer grading until after several row workspaces have been deleted.
 
-For the just-completed Desktop thread, copy only that row's rollout JSONL into a host-local per-row collection directory and collect against the full frozen manifest:
+For the just-completed Desktop thread, copy only that row's rollout JSONL into a host-local per-row collection directory. Before grading, revalidate the captured runtime/workspace identity; if this fails, preserve evidence and stop without grading or recursive cleanup:
+
+```powershell
+python -c "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); w=pathlib.Path(r['workspace']); b={k:tuple(v) for k,v in json.loads(pathlib.Path(r'<host-local-current-row-boundary.json>').read_text(encoding='utf-8')).items()}; codex_automation.validate_runtime_workspace_boundary(r,w,expected=b)"
+```
+
+Then collect against the full frozen manifest:
 
 ```powershell
 python .\benchmarks\harness\routing_eval.py collect `
@@ -134,10 +140,10 @@ python .\benchmarks\harness\routing_eval.py collect `
 
 The per-row report must contain exactly the intended row and no invalid record before cleanup. Collection binds the rollout to its exact opaque workspace first and evaluates the deterministic post-condition directly from that workspace; it does not run a verifier command and does not ask the agent to self-report pass/fail.
 
-After the current row record is preserved, remove the row workspace and verify the runtime root is empty:
+After the current row record is preserved, revalidate the same captured boundary **before** recursive deletion. If identity/topology changed, do not call the remover; preserve evidence and stop. Otherwise remove only the attempt-owned workspace and verify the original runtime root remains empty:
 
 ```powershell
-python -c "import pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); w=pathlib.Path(r['workspace']); codex_automation.remove_runtime_workspace(w); assert not w.exists(); assert list(pathlib.Path(r['runtime_root']).iterdir()) == []"
+python -c "import json,os,pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); w=pathlib.Path(r['workspace']); bp=pathlib.Path(r'<host-local-current-row-boundary.json>'); b={k:tuple(v) for k,v in json.loads(bp.read_text(encoding='utf-8')).items()}; codex_automation.validate_runtime_workspace_boundary(r,w,expected=b); codex_automation.remove_runtime_workspace(w); rr,_=codex_automation.validate_runtime_workspace_boundary(r,w,expected=b,require_workspace=False); assert not os.path.lexists(w); assert list(rr.iterdir()) == []; bp.unlink()"
 ```
 
 Wrong workspace, duplicate identity, prompt drift, arm-catalog mismatch, coordinator/other-row contamination, stale runtime entries, or failed cleanup is protocol failure. Preserve evidence and stop the affected batch; do not repair the row in place. At campaign completion or abort, remove the now-empty opaque runtime root and verify it is gone while retaining coordinator/raw evidence.
