@@ -149,7 +149,8 @@ def _validate_case(case: dict) -> None:
 
 
 def _write_fixture(workspace: pathlib.Path, files: dict[str, str]) -> None:
-    workspace.mkdir(parents=True, exist_ok=True)
+    if not workspace.is_dir():
+        raise ValueError("fixture workspace must already exist")
     for relative, content in files.items():
         try:
             target = _resolved_workspace_target(workspace, relative)

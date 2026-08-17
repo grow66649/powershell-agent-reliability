@@ -86,18 +86,29 @@ def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skil
 def verify_or_create_campaign_identity_lock(lock_path: pathlib.Path, payload: dict, allow_create: bool) -> str:
     ensure_external_evidence_root(lock_path.parent)
     lock_path = lock_path.resolve(strict=False)
-    if lock_path.exists():
+
+    def read_existing() -> dict:
         try:
-            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            return json.loads(lock_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             raise ValueError("campaign identity lock is unreadable") from exc
+
+    if lock_path.exists():
+        existing = read_existing()
         if existing != payload:
             raise ValueError("campaign identity lock does not match current runtime identity")
     else:
         if not allow_create:
             raise ValueError("campaign identity lock is required before row execution")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        try:
+            with lock_path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+        except FileExistsError:
+            existing = read_existing()
+            if existing != payload:
+                raise ValueError("campaign identity lock does not match current runtime identity")
     return sha256_file(lock_path)
 
 
@@ -133,13 +144,28 @@ def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
     return routing_eval._fixture_sha256(files)
 
 
+def _path_is_link_or_junction(path: pathlib.Path) -> bool:
+    is_junction = getattr(path, "is_junction", lambda: False)
+    return path.is_symlink() or bool(is_junction())
+
+
 def materialize_row_workspace(row: dict) -> pathlib.Path:
-    workspace = pathlib.Path(row["workspace"])
-    runtime_root = pathlib.Path(row["runtime_root"])
-    runtime_is_junction = getattr(runtime_root, "is_junction", lambda: False)
-    workspace_is_junction = getattr(workspace, "is_junction", lambda: False)
-    if runtime_root.is_symlink() or runtime_is_junction() or workspace.is_symlink() or workspace_is_junction():
+    raw_workspace = pathlib.Path(row["workspace"])
+    raw_runtime_root = pathlib.Path(row["runtime_root"])
+    if _path_is_link_or_junction(raw_runtime_root) or _path_is_link_or_junction(raw_workspace):
         raise ValueError("runtime root/workspace must not be a symlink or junction")
+    workspace = raw_workspace.resolve(strict=False)
+    runtime_root = raw_runtime_root.resolve(strict=False)
+    if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(runtime_root.name):
+        raise ValueError("runtime root must end in an opaque 32-hex token")
+    if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(workspace.name):
+        raise ValueError("workspace must use an opaque 32-hex row token")
+    if workspace.parent != runtime_root:
+        raise ValueError("workspace must be a direct child of the frozen runtime root")
+    if routing_eval.workspace_identity(str(runtime_root)) != row.get("runtime_root_sha256"):
+        raise ValueError("runtime root identity mismatch")
+    if routing_eval.workspace_identity(str(workspace)) != row.get("workspace_sha256"):
+        raise ValueError("workspace identity mismatch")
     if not runtime_root.is_dir():
         raise RuntimeError("runtime root must exist before row materialization")
     if workspace.exists() or any(runtime_root.iterdir()):
@@ -151,15 +177,18 @@ def materialize_row_workspace(row: dict) -> pathlib.Path:
         raise ValueError("frozen fixture payload is unreadable") from exc
     if not isinstance(files, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in files.items()):
         raise ValueError("frozen fixture payload must map text paths to text content")
+    workspace_created = False
     try:
+        workspace.mkdir(parents=False, exist_ok=False)
+        workspace_created = True
         routing_eval._write_fixture(workspace, files)
         actual_hash = workspace_fixture_sha256(workspace)
         if actual_hash != row.get("fixture_sha256"):
             raise ValueError("workspace fixture SHA256 mismatch")
         return workspace
     except Exception:
-        if workspace.exists():
-            shutil.rmtree(workspace)
+        if workspace_created:
+            remove_runtime_workspace(workspace)
         raise
 
 
@@ -875,6 +904,8 @@ def validate_runtime_topology(
     runtime_root: pathlib.Path,
     workspace: pathlib.Path,
 ) -> None:
+    if _path_is_link_or_junction(runtime_root) or _path_is_link_or_junction(workspace):
+        raise ValueError("runtime root/workspace must not be a symlink or junction")
     coordinator_root = coordinator_root.resolve(strict=False)
     runtime_root = runtime_root.resolve(strict=False)
     workspace = workspace.resolve(strict=False)
@@ -899,8 +930,12 @@ def validate_manifest_row_paths(manifest_path: pathlib.Path, row: dict) -> None:
     actual_fixture = pathlib.Path(row.get("fixture_path", "")).resolve(strict=False)
     if actual_fixture != expected_fixture:
         raise ValueError("manifest fixture path must use the prepared coordinator layout")
-    runtime_root = pathlib.Path(row.get("runtime_root", "")).resolve(strict=False)
-    workspace = pathlib.Path(row.get("workspace", "")).resolve(strict=False)
+    raw_runtime_root = pathlib.Path(row.get("runtime_root", ""))
+    raw_workspace = pathlib.Path(row.get("workspace", ""))
+    if _path_is_link_or_junction(raw_runtime_root) or _path_is_link_or_junction(raw_workspace):
+        raise ValueError("manifest runtime root/workspace must not be a symlink or junction")
+    runtime_root = raw_runtime_root.resolve(strict=False)
+    workspace = raw_workspace.resolve(strict=False)
     if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(runtime_root.name):
         raise ValueError("manifest runtime root must end in an opaque 32-hex token")
     if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(workspace.name):

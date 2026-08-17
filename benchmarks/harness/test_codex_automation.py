@@ -595,6 +595,26 @@ class CampaignIdentityLockTests(unittest.TestCase):
         self.assertEqual(payload["harness_git_head"], "1" * 40)
         self.assertEqual(payload["public_main_sha"], "2" * 40)
 
+    def test_identity_lock_concurrent_initializer_cannot_overwrite_existing_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            lock = root / "campaign-identity.json"
+            payload = {"model": "candidate", "harness_git_head": "1" * 40}
+            winner = {"model": "other", "harness_git_head": "2" * 40}
+            real_open = pathlib.Path.open
+
+            def racing_open(path, mode="r", *args, **kwargs):
+                if path == lock and mode == "x":
+                    with real_open(lock, "w", encoding="utf-8", newline="\n") as handle:
+                        handle.write(json.dumps(winner, sort_keys=True) + "\n")
+                    raise FileExistsError(str(lock))
+                return real_open(path, mode, *args, **kwargs)
+
+            with mock.patch.object(pathlib.Path, "open", autospec=True, side_effect=racing_open):
+                with self.assertRaisesRegex(ValueError, "campaign identity"):
+                    codex_automation.verify_or_create_campaign_identity_lock(lock, payload, allow_create=True)
+            self.assertEqual(json.loads(lock.read_text(encoding="utf-8")), winner)
+
     def test_profile_check_creates_lock_and_rejects_cli_identity_drift(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -690,6 +710,28 @@ class RunRowWorkflowTests(unittest.TestCase):
             self.assertEqual((workspace / "helper.cmd").read_bytes(), content.encode("utf-8"))
             self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), row["fixture_sha256"])
 
+    def test_materialize_row_workspace_rejects_tampered_workspace_outside_runtime_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"},
+                    "files": {"safe.txt": "safe"},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            outside = root / "unrelated" / ("e" * 32)
+            tampered = dict(row)
+            tampered["workspace"] = str(outside)
+            tampered["workspace_sha256"] = codex_automation.routing_eval.workspace_identity(str(outside))
+            with self.assertRaisesRegex(ValueError, "direct child"):
+                codex_automation.materialize_row_workspace(tampered)
+            self.assertFalse(outside.exists())
+            self.assertEqual(list(pathlib.Path(row["runtime_root"]).iterdir()), [])
+
     def test_materialize_row_workspace_rejects_tampered_parent_escape_before_write(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -711,6 +753,37 @@ class RunRowWorkflowTests(unittest.TestCase):
             self.assertFalse(escape.exists())
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
 
+    def test_materialize_row_workspace_does_not_delete_workspace_won_by_race(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            workspace = pathlib.Path(row["workspace"])
+            marker = workspace / "preexisting.txt"
+            real_mkdir = pathlib.Path.mkdir
+
+            def race_mkdir(path, mode=0o777, parents=False, exist_ok=False):
+                if path == workspace:
+                    real_mkdir(path, mode=mode, parents=True, exist_ok=True)
+                    marker.write_text("preserve", encoding="utf-8")
+                    if not exist_ok:
+                        raise FileExistsError(str(path))
+                    return None
+                return real_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+            with mock.patch.object(pathlib.Path, "mkdir", autospec=True, side_effect=race_mkdir):
+                with self.assertRaises(FileExistsError):
+                    codex_automation.materialize_row_workspace(row)
+            self.assertTrue(marker.is_file())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
     def test_materialize_row_workspace_rejects_stale_peer_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -728,6 +801,30 @@ class RunRowWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "runtime root.*empty"):
                 codex_automation.materialize_row_workspace(row)
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_materialize_row_workspace_rejects_link_before_resolving_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{"case_id": "X1", "lane": "train", "group": "should_not_trigger", "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {}}],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            raw_runtime = pathlib.Path(row["runtime_root"])
+            real_resolve = pathlib.Path.resolve
+            real_is_symlink = pathlib.Path.is_symlink
+            def fake_resolve(path, strict=False):
+                if path == raw_runtime:
+                    raise AssertionError("link must be rejected before resolve")
+                return real_resolve(path, strict=strict)
+            def fake_is_symlink(path):
+                if path == raw_runtime:
+                    return True
+                return real_is_symlink(path)
+            with mock.patch.object(pathlib.Path, "resolve", autospec=True, side_effect=fake_resolve), mock.patch.object(pathlib.Path, "is_symlink", autospec=True, side_effect=fake_is_symlink):
+                with self.assertRaisesRegex(ValueError, "symlink|junction"):
+                    codex_automation.materialize_row_workspace(row)
 
     def test_materialize_row_workspace_rejects_symlinked_runtime_root(self):
         with tempfile.TemporaryDirectory() as temp_dir:
