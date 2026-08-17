@@ -589,6 +589,20 @@ class ManifestTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "case_key"):
                 codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", traversal)
 
+    def test_validate_manifest_row_paths_rejects_linked_fixture_leaf(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{"case_id": "X1", "lane": "train", "group": "should_not_trigger", "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {}}],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral", token_factory=lambda: next(tokens),
+            )[0]
+            fixture = pathlib.Path(row["fixture_path"])
+            real_check = codex_automation._path_is_link_or_junction
+            with mock.patch.object(codex_automation, "_path_is_link_or_junction", side_effect=lambda path: pathlib.Path(path) == fixture or real_check(path)):
+                with self.assertRaisesRegex(ValueError, "fixture.*symlink|junction"):
+                    codex_automation.validate_manifest_row_paths(root / "coordinator" / "manifest.jsonl", row)
+
     def test_validate_runtime_topology_rejects_nested_roots_in_both_directions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -987,6 +1001,23 @@ class RunRowWorkflowTests(unittest.TestCase):
             self.assertEqual(list(pathlib.Path(row["runtime_root"]).iterdir()), [])
             self.assertTrue((args.evidence_root / f"{row['sequence']:04d}-{row['case_key']}-M" / "receipt.json").exists())
 
+    def test_execute_run_row_fails_cleanup_when_runtime_root_has_sibling_after_row(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root)
+            sibling = pathlib.Path(row["runtime_root"]) / "unexpected.txt"
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                sibling.write_text("preserve", encoding="utf-8")
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            with self.assertRaisesRegex(RuntimeError, "runtime root.*empty|row cleanup failed"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+                )
+            self.assertTrue(sibling.is_file())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
     def test_execute_run_row_cleans_workspace_and_profile_when_parser_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -1153,6 +1184,9 @@ class OperatorArtifactTests(unittest.TestCase):
         runbook_text = runbook.read_text(encoding="utf-8")
         for phrase in ("profile-check", "run-row", "screening", "Windows Codex Desktop", "concurrency is 1", "--runtime-parent", "opaque", "leakage canary", "Before any fresh scored CLI campaign"):
             self.assertIn(phrase, runbook_text)
+        desktop_runbook = (repo / "docs" / "runbooks" / "routing-eval-desktop.md").read_text(encoding="utf-8")
+        self.assertIn("prompt_sha256", desktop_runbook)
+        self.assertIn("hashlib.sha256", desktop_runbook)
 
     def test_verify_local_runs_and_compiles_automation_tests(self):
         repo = pathlib.Path(__file__).resolve().parents[2]

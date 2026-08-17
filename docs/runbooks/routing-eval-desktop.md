@@ -101,7 +101,7 @@ Only after the candidate routing revision is frozen may the sealed validation pa
 For every manifest row, keep the runtime root single-row and opaque:
 
 1. Apply the declared S or M setup and re-check its catalog invariant.
-2. Verify the manifest runtime root is empty. Materialize **only** the current row from its frozen `fixture_path` using the reviewed harness helper; do not create any peer/future workspace.
+2. Verify the manifest runtime root is empty. Validate the manifest bindings and recompute the exact prompt-byte SHA-256 against `prompt_sha256` before Desktop sees the prompt. Then materialize **only** the current row from its frozen `fixture_path`; do not create any peer/future workspace.
 3. Start a fresh Codex Desktop thread; do not reuse conversational state.
 4. Open exactly the manifest workspace. Its model-visible path must contain only the neutral runtime parent, opaque campaign token, and opaque row token; it must not encode S/M, case/lane, Skill/MCP identity, evaluator labels, or campaign purpose.
 5. Submit the generated prompt file unchanged. Do not add arm names, Skill hints, MCP hints, expected failures, or evaluator instructions.
@@ -111,7 +111,7 @@ For every manifest row, keep the runtime root single-row and opaque:
 From the repository root, materialize exactly one row with the reviewed helper:
 
 ```powershell
-python -c "import pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); codex_automation.validate_manifest_row_paths(m,r); print(codex_automation.materialize_row_workspace(r))"
+python -c "import hashlib,pathlib,sys; sys.path.insert(0,str(pathlib.Path('benchmarks/harness').resolve())); import codex_automation; m=pathlib.Path(r'<campaign-root>\manifest.jsonl'); r=codex_automation.load_manifest_row(m,<sequence>); codex_automation.validate_manifest_row_paths(m,r); p=pathlib.Path(r['prompt_path']); assert hashlib.sha256(p.read_bytes()).hexdigest().upper()==r['prompt_sha256'], 'prompt hash mismatch'; print(codex_automation.materialize_row_workspace(r))"
 ```
 
 Do this immediately before the Desktop row. Do not use this helper to pre-create a batch.

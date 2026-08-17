@@ -69,6 +69,25 @@ class RoutingEvalPrepareTests(unittest.TestCase):
             }
             self.assertTrue(required.issubset(by_arm["S"]))
 
+    def test_prepare_campaign_rejects_linked_prompt_leaf_before_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            prompt_path = coordinator / "prompts" / "R01-T01.txt"
+            prompt_path.parent.mkdir(parents=True)
+            prompt_path.write_text("preserve", encoding="utf-8")
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            real_is_symlink = pathlib.Path.is_symlink
+            def fake_is_symlink(path):
+                return path == prompt_path or real_is_symlink(path)
+            with mock.patch.object(pathlib.Path, "is_symlink", autospec=True, side_effect=fake_is_symlink):
+                with self.assertRaisesRegex(ValueError, "prompt.*symlink|junction"):
+                    routing_eval.prepare_campaign(
+                        [_case()], coordinator, trials=1, seed=7,
+                        runtime_parent=root / "runtime-parent", token_factory=lambda: next(tokens),
+                    )
+            self.assertEqual(prompt_path.read_text(encoding="utf-8"), "preserve")
+
     def test_prepare_campaign_rejects_runtime_parent_inside_coordinator(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -89,6 +108,27 @@ class RoutingEvalPrepareTests(unittest.TestCase):
                     [_case()], root / "coordinator", trials=1, seed=7,
                     runtime_parent=root / "runtime-parent", token_factory=lambda: next(tokens),
                 )
+
+    def test_prepare_campaign_rolls_back_attempt_owned_state_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            coordinator.mkdir()
+            marker = coordinator / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            runtime_parent = root / "runtime-parent"
+            tokens = iter(["a" * 32, "a" * 32, "b" * 32])
+            with self.assertRaisesRegex(ValueError, "unique"):
+                routing_eval.prepare_campaign(
+                    [_case()], coordinator, trials=1, seed=7,
+                    runtime_parent=runtime_parent, token_factory=lambda: next(tokens),
+                )
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+            self.assertFalse((coordinator / "prompts").exists())
+            self.assertFalse((coordinator / "fixtures").exists())
+            self.assertFalse((coordinator / "manifest.jsonl").exists())
+            self.assertFalse((coordinator / "campaign.json").exists())
+            self.assertFalse(runtime_parent.exists())
 
     def test_prepare_campaign_rejects_reused_opaque_row_token(self):
         with tempfile.TemporaryDirectory() as temp_dir:

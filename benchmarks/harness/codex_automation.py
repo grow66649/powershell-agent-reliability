@@ -936,12 +936,18 @@ def validate_manifest_row_paths(manifest_path: pathlib.Path, row: dict) -> None:
     if arm not in {"S", "M"}:
         raise ValueError("manifest row must contain a valid case_key and arm")
     validate_case_key(case_key)
+    raw_prompt = pathlib.Path(row.get("prompt_path", ""))
+    if _path_is_link_or_junction(raw_prompt) or _path_is_link_or_junction(raw_prompt.parent):
+        raise ValueError("manifest prompt path must not be a symlink or junction")
     expected_prompt = (coordinator_root / "prompts" / f"{case_key}.txt").resolve(strict=False)
-    actual_prompt = pathlib.Path(row.get("prompt_path", "")).resolve(strict=False)
+    actual_prompt = raw_prompt.resolve(strict=False)
     if actual_prompt != expected_prompt:
         raise ValueError("manifest prompt path must use the prepared coordinator layout")
+    raw_fixture = pathlib.Path(row.get("fixture_path", ""))
+    if _path_is_link_or_junction(raw_fixture) or _path_is_link_or_junction(raw_fixture.parent):
+        raise ValueError("manifest fixture path must not be a symlink or junction")
     expected_fixture = (coordinator_root / "fixtures" / f"{case_key}.json").resolve(strict=False)
-    actual_fixture = pathlib.Path(row.get("fixture_path", "")).resolve(strict=False)
+    actual_fixture = raw_fixture.resolve(strict=False)
     if actual_fixture != expected_fixture:
         raise ValueError("manifest fixture path must use the prepared coordinator layout")
     raw_runtime_root = pathlib.Path(row.get("runtime_root", ""))
@@ -1100,7 +1106,10 @@ def execute_run_row(
         if workspace_materialized:
             try:
                 remove_runtime_workspace(workspace)
-                workspace_cleanup_ok = not workspace.exists()
+                runtime_root = pathlib.Path(row["runtime_root"])
+                if _path_is_link_or_junction(runtime_root) or not runtime_root.is_dir() or any(runtime_root.iterdir()):
+                    raise RuntimeError("runtime root must be empty after row cleanup")
+                workspace_cleanup_ok = not os.path.lexists(workspace)
             except Exception as exc:
                 cleanup_errors.append(("workspace", exc))
         if cleanup_errors:
