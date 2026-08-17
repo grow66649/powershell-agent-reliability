@@ -645,6 +645,28 @@ class MaterializeProfileTests(unittest.TestCase):
                 codex_automation.remove_profile(profile)
             self.assertFalse((profile / "auth.json").exists())
 
+    def test_materialize_profile_rejects_reparse_openai_auth_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            live = _live_config()
+            live["model_provider"] = "openai"
+            live["model"] = "gpt-5.6-luna"
+            live.pop("model_providers")
+            live_path = root / "config.toml"
+            live_path.write_text(codex_automation.build_profile_text(live, "S", PSR_SKILL, PSR_MCP), encoding="utf-8")
+            auth_path = root / "auth.json"
+            auth_path.write_text('{"OPENAI_API_KEY":"secret-test-value"}', encoding="utf-8")
+            original = codex_automation._path_is_link_or_junction
+            with mock.patch.object(codex_automation, "_path_is_link_or_junction", side_effect=lambda path: pathlib.Path(path) == auth_path or original(path)):
+                with self.assertRaisesRegex(ValueError, "auth.json"):
+                    probes = iter([[{"name": "powershell-reliability", "path": PSR_SKILL}], [{"name": "powershell-reliability", "path": PSR_SKILL}]])
+                    codex_automation.materialize_profile(
+                        live_path, "S", pathlib.Path(PSR_SKILL), pathlib.Path(PSR_MCP), pathlib.Path("C:/Codex/codex.exe"),
+                        temp_parent=root, acl_func=mock.Mock(), skill_probe=mock.Mock(side_effect=lambda *_: next(probes)),
+                        mcp_probe=mock.Mock(return_value=[{"name": "psr_reliability_native", "enabled": True, "transport": {"type": "stdio", "command": PSR_MCP, "args": []}}]),
+                    )
+            self.assertEqual(list(root.glob("psr-codex-profile-*")), [])
+
     def test_materialize_profile_cleans_fresh_profile_when_identity_capture_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
