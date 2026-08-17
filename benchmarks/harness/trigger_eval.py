@@ -214,8 +214,7 @@ def _command_component_char(value: str) -> bool:
 
 
 _STRUCTURED_TOOL_START_RE = re.compile(
-    r"tools\.(shell_command|exec_command)\s*\(\s*\{",
-    re.IGNORECASE,
+    r"tools\.(shell_command|exec_command)\s*\(\s*\{"
 )
 
 
@@ -246,7 +245,9 @@ def _find_structured_tool_start(value: str):
             continue
         match = _STRUCTURED_TOOL_START_RE.match(value, index)
         if match is not None:
-            return match
+            previous = value[index - 1] if index > 0 else ""
+            if not previous or (not (previous.isalnum() or previous in "_$.")):
+                return match
         index += 1
     return None
 
@@ -299,6 +300,7 @@ def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
     stack: list[str] = []
     closers = {"(": ")", "[": "]", "{": "}"}
     started = False
+    scalar_gap = False
     while index < len(value):
         char = value[index]
         if quote is not None:
@@ -307,8 +309,12 @@ def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
             index += 1
             continue
         if char.isspace():
+            if started and not stack:
+                scalar_gap = True
             index += 1
             continue
+        if scalar_gap and not stack and char not in {",", "}"}:
+            return None
         if char in {"\"", "'", "`"}:
             started = True
             quote = char
@@ -351,6 +357,8 @@ def _structured_tool_command(value: str) -> tuple[bool, str | None]:
             while index < len(value) and value[index].isspace():
                 index += 1
             if index >= len(value) or value[index] != ")":
+                return True, None
+            if _find_structured_tool_start(value[index + 1:]) is not None:
                 return True, None
             return True, command if command_seen else None
         parsed_key = _consume_structured_key(value, index)
@@ -405,6 +413,8 @@ def _left_fragment_boundary(command: str, index: int) -> bool:
 
 def _right_fragment_boundary(command: str, end: int) -> bool:
     cursor = end
+    if cursor + 1 < len(command) and command[cursor] == "\\" and command[cursor + 1] in {"\"", "'"}:
+        return False
     skipped_quote = False
     while cursor < len(command) and command[cursor] in {"\"", "'"}:
         skipped_quote = True
@@ -460,12 +470,44 @@ def raw_command_fragment_matches(expected: str | None, actual: str | None) -> bo
     return any(_normalized_fragment_matches(item, command) for item in fragments)
 
 
+def _has_unquoted_wrapper_marker(value: str) -> bool:
+    quote = None
+    quote_start = 0
+    lowered = value.lower()
+    markers = ("tools.shell_command", "tools.exec_command")
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote is not None:
+            if char == quote and not _quote_is_escaped(value, index, quote_start):
+                quote = None
+            index += 1
+            continue
+        if char in {"\"", "'", "`"}:
+            quote = char
+            quote_start = index + 1
+            index += 1
+            continue
+        for marker in markers:
+            if not lowered.startswith(marker, index):
+                continue
+            cursor = index + len(marker)
+            while cursor < len(value) and value[cursor].isspace():
+                cursor += 1
+            if cursor < len(value) and value[cursor] == "(":
+                return True
+        index += 1
+    return False
+
+
 def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
     if not isinstance(actual, str) or not actual:
         return False
     recognized, command = _structured_tool_command(actual)
     if recognized:
         return command is not None and raw_command_fragment_matches(expected, command)
+    if _has_unquoted_wrapper_marker(actual):
+        return False
     return raw_command_fragment_matches(expected, actual)
 
 

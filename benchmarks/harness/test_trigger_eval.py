@@ -267,6 +267,23 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertFalse(trigger_eval._is_shell_call(actual))
 
 
+    def test_escaped_literal_quote_suffix_does_not_create_right_boundary(self):
+        actual = r'tools.shell_command({command:"cmd.exe /d /c \"ver\\\"suffix\""})'
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_structured_wrapper_requires_lexical_case_sensitive_tool_name(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "nottools.shell_command({command:'helper.cmd'})"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "TOOLS.SHELL_COMMAND({command:'helper.cmd'})"))
+
+    def test_structured_wrapper_rejects_multiple_execution_wrappers(self):
+        actual = "tools.shell_command({command:'helper.cmd'}); tools.shell_command({command:'echo wrong'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_whitespace_split_metadata_scalar(self):
+        actual = "tools.shell_command({justification:foo bar, command:'helper.cmd'})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):
         case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}
