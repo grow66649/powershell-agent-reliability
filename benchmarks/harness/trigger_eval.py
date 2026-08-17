@@ -220,9 +220,13 @@ def _normalize_match_quotes(value: str) -> str:
                 index += 2
                 continue
             previous = chars[-1] if chars else ""
-            if not chars or previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES:
+            if in_single_quotes:
+                in_single_quotes = False
+            elif not chars or previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES:
                 chars.append(" ")
-            in_single_quotes = not in_single_quotes
+                in_single_quotes = True
+            else:
+                chars.append(char)
             index += 1
             continue
         chars.append(char)
