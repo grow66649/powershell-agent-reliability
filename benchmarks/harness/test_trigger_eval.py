@@ -319,6 +319,15 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
 
 
+    def test_cmd_quote_variant_rejects_arbitrary_quoted_suffix(self):
+        actual = 'cmd.exe /d /c "ver suffix"'
+        self.assertFalse(trigger_eval.raw_command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_wrapper_like_pseudo_name_does_not_fall_back_to_raw_matching(self):
+        actual = "tools.shell_command_extra helper.cmd"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):
         case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}

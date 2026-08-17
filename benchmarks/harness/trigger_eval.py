@@ -19,14 +19,19 @@ SHELL_CALLS = ("tools.shell_command", "tools.exec_command")
 VALID_GROUPS = {"should_trigger", "should_not_trigger", "boundary"}
 
 
+def _is_legacy_shell_call(call_input: str) -> bool:
+    stripped = call_input.lstrip()
+    return any(
+        stripped == name or (stripped.startswith(name) and len(stripped) > len(name) and stripped[len(name)].isspace())
+        for name in SHELL_CALLS
+    )
+
+
 def _is_shell_call(call_input: str) -> bool:
     if not isinstance(call_input, str) or not call_input:
         return False
     recognized, _ = _structured_tool_command(call_input)
-    if recognized:
-        return True
-    stripped = call_input.lstrip()
-    return any(stripped == name or stripped.startswith(name + " ") for name in SHELL_CALLS)
+    return recognized or _is_legacy_shell_call(call_input)
 
 
 def _sha256_text(value: str) -> str:
@@ -421,12 +426,12 @@ def _left_fragment_boundary(command: str, index: int) -> bool:
     return previous.isspace() or not _command_component_char(previous)
 
 
-def _right_fragment_boundary(command: str, end: int, allow_quoted_content: bool = False) -> bool:
+def _right_fragment_boundary(command: str, end: int) -> bool:
     cursor = end
     if cursor + 1 < len(command) and command[cursor] == "\\" and command[cursor + 1] in {"\"", "'"}:
         return False
     active_quote = _active_quote_at(command, end)
-    if cursor < len(command) and not allow_quoted_content and active_quote is not None and command[cursor].isspace():
+    if cursor < len(command) and active_quote is not None and command[cursor].isspace():
         boundary = cursor
         while boundary < len(command) and command[boundary].isspace():
             boundary += 1
@@ -451,11 +456,10 @@ def _cmd_c_single_token_quote_variant(fragment: str) -> str | None:
     tail = fragment[len(prefix):]
     if not tail or any(char.isspace() for char in tail) or any(char in "\"'" for char in tail):
         return None
-    return prefix + '"' + tail
+    return prefix + '"' + tail + " >"
 
 
 def _normalized_fragment_matches(fragment: str, command: str) -> bool:
-    fragment_opens_quote = _active_quote_at(fragment, len(fragment)) is not None
     start = 0
     while True:
         index = command.find(fragment, start)
@@ -469,7 +473,7 @@ def _normalized_fragment_matches(fragment: str, command: str) -> bool:
         )
         right_ok = (
             not _command_component_char(fragment[-1])
-            or _right_fragment_boundary(command, end, fragment_opens_quote)
+            or _right_fragment_boundary(command, end)
         )
         if left_ok and right_ok:
             return True
@@ -507,12 +511,7 @@ def _has_unquoted_wrapper_marker(value: str) -> bool:
             index += 1
             continue
         for marker in markers:
-            if not lowered.startswith(marker, index):
-                continue
-            cursor = index + len(marker)
-            while cursor < len(value) and value[cursor].isspace():
-                cursor += 1
-            if cursor < len(value) and value[cursor] == "(":
+            if lowered.startswith(marker, index):
                 return True
         index += 1
     return False
@@ -524,6 +523,8 @@ def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
     recognized, command = _structured_tool_command(actual)
     if recognized:
         return command is not None and raw_command_fragment_matches(expected, command)
+    if _is_legacy_shell_call(actual):
+        return raw_command_fragment_matches(expected, actual)
     if _has_unquoted_wrapper_marker(actual):
         return False
     return raw_command_fragment_matches(expected, actual)
