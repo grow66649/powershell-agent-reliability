@@ -119,6 +119,18 @@ class RoutingEvalPrepareTests(unittest.TestCase):
                             runtime_parent=runtime_parent, token_factory=lambda: next(tokens),
                         )
 
+    def test_prepare_campaign_rejects_runtime_parent_inside_git_ancestry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            (root / ".git").mkdir()
+            tokens = iter(["a" * 32, "b" * 32, "c" * 32])
+            with self.assertRaisesRegex(ValueError, "Git|git.*ancestry"):
+                routing_eval.prepare_campaign(
+                    [_case()], root / "coordinator", trials=1, seed=7,
+                    runtime_parent=root / "runtime-parent",
+                    token_factory=lambda: next(tokens),
+                )
+
     def test_prepare_campaign_rejects_runtime_parent_inside_coordinator(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)

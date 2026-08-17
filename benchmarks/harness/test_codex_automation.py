@@ -158,7 +158,7 @@ class CliExecutionTests(unittest.TestCase):
 
     def test_codex_argv_uses_ephemeral_json_workspace_and_stdin(self):
         argv = codex_automation.codex_argv(pathlib.Path("C:/Codex/codex.exe"), pathlib.Path("C:/workspace"), model="gpt-5.6-luna")
-        self.assertEqual(argv, ["C:/Codex/codex.exe", "exec", "--ephemeral", "--json", "--model", "gpt-5.6-luna", "-C", "C:/workspace", "-"])
+        self.assertEqual(argv, ["C:/Codex/codex.exe", "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--model", "gpt-5.6-luna", "-C", "C:/workspace", "-"])
         self.assertNotIn("dangerously", " ".join(argv).lower())
 
     def test_remove_profile_deletes_directory_and_fails_if_leftover(self):

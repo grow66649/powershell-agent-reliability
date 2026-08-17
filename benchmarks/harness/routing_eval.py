@@ -200,6 +200,14 @@ def _path_is_relative_to(child: pathlib.Path, parent: pathlib.Path) -> bool:
         return False
 
 
+def _path_has_git_ancestor(path: pathlib.Path) -> bool:
+    resolved = path.resolve(strict=False)
+    for candidate in (resolved, *resolved.parents):
+        if (candidate / ".git").exists():
+            return True
+    return False
+
+
 def _prepare_campaign_impl(
     cases: list[dict],
     output_root: pathlib.Path,
@@ -220,6 +228,8 @@ def _prepare_campaign_impl(
         seen_ids.add(case["case_id"])
     output_root = output_root.resolve(strict=False)
     runtime_parent = (runtime_parent or pathlib.Path(tempfile.gettempdir())).resolve(strict=False)
+    if _path_has_git_ancestor(runtime_parent):
+        raise ValueError("neutral runtime parent must not be inside Git repository ancestry")
     campaign_token = _opaque_token(token_factory)
     raw_runtime_root = runtime_parent / campaign_token
     if _path_is_link_or_junction(raw_runtime_root):
