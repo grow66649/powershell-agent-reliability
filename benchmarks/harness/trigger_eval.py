@@ -193,50 +193,17 @@ def validate_expected_first_command_fragment(value) -> str | None:
     return value
 
 
+_QUOTE_CHARS = set("\"'")
 _QUOTE_OPEN_BOUNDARIES = set(":=({[,;|&<>")
 
 
 def _normalize_match_quotes(value: str) -> str:
-    chars = []
-    in_double_quotes = False
-    in_single_quotes = False
-    index = 0
-    while index < len(value):
-        char = value[index]
-        if char == '"':
-            if in_single_quotes:
-                chars.append(char)
-                index += 1
-                continue
-            previous = chars[-1] if chars else ""
-            if not chars or previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES:
-                chars.append(" ")
-            in_double_quotes = not in_double_quotes
-            index += 1
-            continue
-        if char == "'":
-            if in_double_quotes:
-                chars.append(char)
-                index += 1
-                continue
-            if in_single_quotes and index + 1 < len(value) and value[index + 1] == "'":
-                chars.append(char)
-                index += 2
-                continue
-            previous = chars[-1] if chars else ""
-            if in_single_quotes:
-                in_single_quotes = False
-            elif not chars or previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES:
-                chars.append(" ")
-                in_single_quotes = True
-            else:
-                chars.append(char)
-            index += 1
-            continue
-        chars.append(char)
-        index += 1
-    return "".join(chars)
-
+    tokens = []
+    for token in value.split():
+        if token and token[0] in _QUOTE_CHARS:
+            token = token[1:]
+        tokens.append(token)
+    return " ".join(tokens)
 
 def _norm_command(value: str | None) -> str:
     if value is None:
@@ -254,6 +221,16 @@ def _command_component_char(value: str) -> bool:
     return not value.isspace() and value not in _COMMAND_FRAGMENT_BOUNDARIES
 
 
+def _left_fragment_boundary(command: str, index: int) -> bool:
+    cursor = index - 1
+    while cursor >= 0 and command[cursor] in _QUOTE_CHARS:
+        cursor -= 1
+    if cursor < 0:
+        return True
+    previous = command[cursor]
+    return previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES or not _command_component_char(previous)
+
+
 def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
     fragment = _norm_command(expected)
     command = _norm_command(actual)
@@ -268,7 +245,7 @@ def command_fragment_matches(expected: str | None, actual: str | None) -> bool:
         left_ok = (
             not _command_component_char(fragment[0])
             or index == 0
-            or not _command_component_char(command[index - 1])
+            or _left_fragment_boundary(command, index)
         )
         right_ok = (
             not _command_component_char(fragment[-1])
