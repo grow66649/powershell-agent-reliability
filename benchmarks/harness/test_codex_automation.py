@@ -1071,10 +1071,13 @@ class RunRowWorkflowTests(unittest.TestCase):
             coordinator = args.manifest.parent
             process = mock.Mock(return_value={"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1})
             parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 1, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [{"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{coordinator}'", "exit_code": 0}], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
-            receipt = codex_automation.execute_run_row(
-                args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
-                process_runner=process, json_parser=mock.Mock(return_value=parsed),
-            )
+            with self.assertRaisesRegex(RuntimeError, "protocol contamination"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                )
+            receipt_path = args.evidence_root / f"{row['sequence']:04d}-{row['case_key']}-M" / "receipt.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             self.assertTrue(receipt["protocol_contamination"])
             self.assertEqual([item["kind"] for item in receipt["contamination_evidence"]], ["coordinator_access"])
             evidence_text = json.dumps(receipt["contamination_evidence"])

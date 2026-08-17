@@ -1136,6 +1136,8 @@ def execute_run_row(
     (output_dir / "receipt.json").write_text(
         json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    if contamination_evidence:
+        raise RuntimeError("protocol contamination detected; bounded receipt preserved")
     return receipt
 
 
