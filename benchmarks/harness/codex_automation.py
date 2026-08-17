@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 import pathlib
 import re
@@ -86,18 +87,29 @@ def campaign_identity_payload(cli_identity: dict, skill_path: pathlib.Path, skil
 def verify_or_create_campaign_identity_lock(lock_path: pathlib.Path, payload: dict, allow_create: bool) -> str:
     ensure_external_evidence_root(lock_path.parent)
     lock_path = lock_path.resolve(strict=False)
-    if lock_path.exists():
+
+    def read_existing() -> dict:
         try:
-            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            return json.loads(lock_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             raise ValueError("campaign identity lock is unreadable") from exc
+
+    if lock_path.exists():
+        existing = read_existing()
         if existing != payload:
             raise ValueError("campaign identity lock does not match current runtime identity")
     else:
         if not allow_create:
             raise ValueError("campaign identity lock is required before row execution")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        try:
+            with lock_path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+        except FileExistsError:
+            existing = read_existing()
+            if existing != payload:
+                raise ValueError("campaign identity lock does not match current runtime identity")
     return sha256_file(lock_path)
 
 
@@ -111,6 +123,14 @@ def ensure_evidence_outside_workspace(evidence_root: pathlib.Path, workspace: pa
     except ValueError:
         return resolved_evidence
     raise ValueError("evidence root must not equal or descend from the row workspace")
+
+
+def ensure_evidence_runtime_disjoint(evidence_root: pathlib.Path, runtime_root: pathlib.Path) -> pathlib.Path:
+    resolved_evidence = evidence_root.resolve(strict=False)
+    resolved_runtime = runtime_root.resolve(strict=False)
+    if _is_relative_to(resolved_evidence, resolved_runtime) or _is_relative_to(resolved_runtime, resolved_evidence):
+        raise ValueError("evidence root and runtime root must be disjoint")
+    return resolved_evidence
 
 
 def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
@@ -131,6 +151,118 @@ def workspace_fixture_sha256(workspace: pathlib.Path) -> str:
         except UnicodeDecodeError as exc:
             raise ValueError(f"workspace fixture must contain UTF-8 text files only: {relative}") from exc
     return routing_eval._fixture_sha256(files)
+
+
+def _path_is_link_or_junction(path: pathlib.Path) -> bool:
+    is_junction = getattr(path, "is_junction", lambda: False)
+    return path.is_symlink() or bool(is_junction())
+
+
+def _filesystem_object_identity(path: pathlib.Path) -> tuple[int, int]:
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError("runtime boundary entry is missing or unreadable") from exc
+    return int(info.st_dev), int(info.st_ino)
+
+
+def validate_runtime_workspace_boundary(row: dict, workspace: pathlib.Path, expected=None, require_workspace: bool = True):
+    raw_runtime_root = pathlib.Path(row["runtime_root"])
+    raw_workspace = pathlib.Path(row["workspace"])
+    if _path_is_link_or_junction(raw_runtime_root) or _path_is_link_or_junction(raw_workspace):
+        raise RuntimeError("runtime root/workspace boundary changed to a symlink or junction")
+    runtime_root = raw_runtime_root.resolve(strict=False)
+    expected_workspace = raw_workspace.resolve(strict=False)
+    observed_workspace = pathlib.Path(workspace).resolve(strict=False)
+    if observed_workspace != expected_workspace or expected_workspace.parent != runtime_root:
+        raise RuntimeError("runtime root/workspace boundary containment changed")
+    if routing_eval.workspace_identity(str(runtime_root)) != row.get("runtime_root_sha256"):
+        raise RuntimeError("runtime root identity changed")
+    if routing_eval.workspace_identity(str(expected_workspace)) != row.get("workspace_sha256"):
+        raise RuntimeError("workspace identity changed")
+    if not runtime_root.is_dir():
+        raise RuntimeError("runtime root must remain a directory")
+    if require_workspace and not observed_workspace.is_dir():
+        raise RuntimeError("workspace must remain a directory")
+    current_root_identity = _filesystem_object_identity(raw_runtime_root)
+    current_workspace_identity = None
+    if require_workspace:
+        current_workspace_identity = _filesystem_object_identity(raw_workspace)
+    if expected is not None:
+        if current_root_identity != expected["runtime_root"]:
+            raise RuntimeError("runtime root filesystem identity changed")
+        if require_workspace and current_workspace_identity != expected["workspace"]:
+            raise RuntimeError("workspace filesystem identity changed")
+    return runtime_root, observed_workspace
+
+
+def capture_runtime_workspace_boundary(row: dict, workspace: pathlib.Path) -> dict:
+    runtime_root, observed_workspace = validate_runtime_workspace_boundary(row, workspace)
+    return {
+        "runtime_root": _filesystem_object_identity(runtime_root),
+        "workspace": _filesystem_object_identity(observed_workspace),
+    }
+
+
+def materialize_row_workspace(row: dict) -> pathlib.Path:
+    raw_workspace = pathlib.Path(row["workspace"])
+    raw_runtime_root = pathlib.Path(row["runtime_root"])
+    if _path_is_link_or_junction(raw_runtime_root) or _path_is_link_or_junction(raw_workspace):
+        raise ValueError("runtime root/workspace must not be a symlink or junction")
+    workspace = raw_workspace.resolve(strict=False)
+    runtime_root = raw_runtime_root.resolve(strict=False)
+    if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(runtime_root.name):
+        raise ValueError("runtime root must end in an opaque 32-hex token")
+    if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(workspace.name):
+        raise ValueError("workspace must use an opaque 32-hex row token")
+    if workspace.parent != runtime_root:
+        raise ValueError("workspace must be a direct child of the frozen runtime root")
+    if routing_eval.workspace_identity(str(runtime_root)) != row.get("runtime_root_sha256"):
+        raise ValueError("runtime root identity mismatch")
+    if routing_eval.workspace_identity(str(workspace)) != row.get("workspace_sha256"):
+        raise ValueError("workspace identity mismatch")
+    if not runtime_root.is_dir():
+        raise RuntimeError("runtime root must exist before row materialization")
+    if workspace.exists() or any(runtime_root.iterdir()):
+        raise RuntimeError("runtime root must be empty before row materialization")
+    fixture_path = pathlib.Path(row["fixture_path"])
+    try:
+        files = json.loads(fixture_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("frozen fixture payload is unreadable") from exc
+    if not isinstance(files, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in files.items()):
+        raise ValueError("frozen fixture payload must map text paths to text content")
+    workspace_created = False
+    try:
+        workspace.mkdir(parents=False, exist_ok=False)
+        workspace_created = True
+        routing_eval._write_fixture(workspace, files)
+        actual_hash = workspace_fixture_sha256(workspace)
+        if actual_hash != row.get("fixture_sha256"):
+            raise ValueError("workspace fixture SHA256 mismatch")
+        return workspace
+    except Exception:
+        if workspace_created:
+            remove_runtime_workspace(workspace)
+        raise
+
+
+def remove_runtime_workspace(workspace: pathlib.Path) -> None:
+    is_junction = getattr(workspace, "is_junction", lambda: False)
+    if workspace.is_symlink():
+        workspace.unlink()
+        if os.path.lexists(workspace):
+            raise RuntimeError(f"runtime workspace cleanup failed: {workspace}")
+        raise RuntimeError("runtime workspace became a symlink during cleanup")
+    if is_junction():
+        workspace.rmdir()
+        if os.path.lexists(workspace):
+            raise RuntimeError(f"runtime workspace cleanup failed: {workspace}")
+        raise RuntimeError("runtime workspace became a junction during cleanup")
+    if os.path.lexists(workspace):
+        shutil.rmtree(workspace)
+    if os.path.lexists(workspace):
+        raise RuntimeError(f"runtime workspace cleanup failed: {workspace}")
 
 
 def _toml_literal(value) -> str:
@@ -290,10 +422,39 @@ def codex_argv(exe: pathlib.Path, workspace: pathlib.Path, model: str | None = N
     return argv
 
 
-def remove_profile(profile: pathlib.Path) -> None:
-    if profile.exists():
+def validate_profile_identity(profile: pathlib.Path, expected_identity) -> None:
+    if not os.path.lexists(profile):
+        raise RuntimeError("secret-bearing profile is missing")
+    if _path_is_link_or_junction(profile):
+        raise RuntimeError("secret-bearing profile filesystem identity changed")
+    if _filesystem_object_identity(profile) != tuple(expected_identity):
+        raise RuntimeError("secret-bearing profile filesystem identity changed")
+    if not profile.is_dir():
+        raise RuntimeError("secret-bearing profile is no longer a directory")
+
+
+def remove_profile(profile: pathlib.Path, expected_identity=None) -> None:
+    if not os.path.lexists(profile):
+        return
+    if expected_identity is not None:
+        validate_profile_identity(profile, expected_identity)
         shutil.rmtree(profile)
-    if profile.exists():
+        if os.path.lexists(profile):
+            raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
+        return
+    is_junction = getattr(profile, "is_junction", lambda: False)
+    if profile.is_symlink():
+        profile.unlink()
+        if os.path.lexists(profile):
+            raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
+        raise RuntimeError("secret-bearing profile became a symlink during cleanup")
+    if is_junction():
+        profile.rmdir()
+        if os.path.lexists(profile):
+            raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
+        raise RuntimeError("secret-bearing profile became a junction during cleanup")
+    shutil.rmtree(profile)
+    if os.path.lexists(profile):
         raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
 
 
@@ -473,9 +634,13 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
                     summary["completed_event_index"] = event_count
                     summary["terminal_status"] = item.get("status")
                 if item_kind == "command_execution":
-                    for field in ("exit_code",):
-                        if field in item:
-                            summary[field] = item[field]
+                    for field in ("command", "cwd", "workdir", "exit_code"):
+                        value = item.get(field)
+                        if field == "exit_code":
+                            if field in item:
+                                summary[field] = value
+                        elif isinstance(value, str) and value:
+                            summary[field] = value
                 else:
                     for field in ("server", "tool"):
                         if field in item:
@@ -518,6 +683,88 @@ def parse_cli_jsonl(path: pathlib.Path, allow_truncated_tail: bool = False) -> d
     }
 
 
+def _known_path_sha256(value: pathlib.Path | str) -> str:
+    normalized = str(pathlib.PureWindowsPath(str(value))).replace("/", "\\").rstrip("\\").casefold()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest().upper()
+
+
+def _text_mentions_windows_path(text: str, path: pathlib.Path | str) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
+    normalized_text = text.replace("/", "\\").casefold()
+    normalized_path = str(pathlib.PureWindowsPath(str(path))).replace("/", "\\").rstrip("\\").casefold()
+    if not normalized_path:
+        return False
+    pattern = rf"(?<![A-Za-z0-9_.-]){re.escape(normalized_path)}(?![A-Za-z0-9_.-])"
+    return re.search(pattern, normalized_text) is not None
+
+
+def _command_mentions_known_path(command: dict, target: pathlib.Path | str) -> bool:
+    absolute_fields = [command.get("command"), command.get("cwd"), command.get("workdir")]
+    if any(_text_mentions_windows_path(value, target) for value in absolute_fields if isinstance(value, str)):
+        return True
+    command_text = command.get("command")
+    if not isinstance(command_text, str) or not command_text:
+        return False
+    target_text = str(target)
+    for base_value in (command.get("cwd"), command.get("workdir")):
+        if not isinstance(base_value, str) or not base_value or not ntpath.isabs(base_value):
+            continue
+        try:
+            relative = ntpath.relpath(target_text, start=base_value)
+        except ValueError:
+            continue
+        if relative not in {"", "."} and _text_mentions_windows_path(command_text, relative):
+            return True
+    return False
+
+
+def detect_campaign_contamination(
+    parsed: dict,
+    manifest_rows: list[dict],
+    current_row: dict,
+    coordinator_root: pathlib.Path,
+) -> list[dict]:
+    current_workspace = str(current_row.get("workspace") or "")
+    current_key = _windows_path_key(current_workspace) if current_workspace else ""
+    other_paths = []
+    for row in manifest_rows:
+        value = row.get("workspace")
+        if not isinstance(value, str) or not value:
+            continue
+        if _windows_path_key(value) != current_key:
+            other_paths.append(value)
+
+    def target_aliases(kind: str, value: pathlib.Path | str):
+        raw = pathlib.Path(value)
+        resolved = raw.resolve(strict=False)
+        canonical_hash = _known_path_sha256(resolved)
+        candidates = []
+        for candidate in (str(raw), str(resolved)):
+            key = _windows_path_key(candidate)
+            if key not in {_windows_path_key(item) for item in candidates}:
+                candidates.append(candidate)
+        return [(kind, candidate, canonical_hash) for candidate in candidates]
+
+    targets = target_aliases("coordinator_access", coordinator_root)
+    for value in other_paths:
+        targets.extend(target_aliases("other_row_workspace_access", value))
+
+    evidence = []
+    seen = set()
+    for command in parsed.get("commands") or []:
+        command_id = command.get("id")
+        for kind, target, path_sha256 in targets:
+            if not _command_mentions_known_path(command, target):
+                continue
+            identity = (kind, command_id, path_sha256)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            evidence.append({"kind": kind, "command_id": command_id, "path_sha256": path_sha256})
+    return evidence
+
+
 def validate_cli_terminal_state(process_result: dict, parsed: dict) -> None:
     if process_result.get("timed_out"):
         return
@@ -525,16 +772,33 @@ def validate_cli_terminal_state(process_result: dict, parsed: dict) -> None:
         raise ValueError("CLI JSONL is missing a terminal turn event")
 
 
-def evaluate_manifest_row(manifest_row: dict, workspace: pathlib.Path) -> dict:
+def evaluate_manifest_row(manifest_row: dict, workspace: pathlib.Path, runtime_boundary=None) -> dict:
+    if runtime_boundary is not None:
+        validate_runtime_workspace_boundary(manifest_row, workspace, expected=runtime_boundary)
     row = dict(manifest_row)
     row["workspace"] = str(workspace)
     rule = row.get("post_condition", {"kind": "none"})
     kind = rule.get("kind") if isinstance(rule, dict) else None
     if kind == "workspace_state":
+        if _path_is_link_or_junction(workspace):
+            raise ValueError("workspace root must not be a symlink or junction during post-condition evaluation")
         return routing_eval.evaluate_workspace_state(row)
     if kind == "none":
         return routing_eval.evaluate_post_condition([], row)
     raise ValueError("CLI automation supports only workspace_state/none post-conditions")
+
+
+def _receipt_native_commands(commands) -> list[dict]:
+    allowed = (
+        "id", "type", "started_event_index", "completed_event_index",
+        "terminal_status", "exit_code",
+    )
+    result = []
+    for command in commands or []:
+        if not isinstance(command, dict):
+            continue
+        result.append({key: command[key] for key in allowed if key in command})
+    return result
 
 
 def normalized_execution_receipt(
@@ -544,7 +808,9 @@ def normalized_execution_receipt(
     profile_meta: dict,
     skill_catalog: list[dict],
     post_condition: dict,
-    cleanup_ok: bool,
+    profile_cleanup_ok: bool,
+    workspace_cleanup_ok: bool,
+    contamination_evidence=(),
 ) -> dict:
     receipt = {
         "schema_version": 1,
@@ -582,12 +848,16 @@ def normalized_execution_receipt(
         "incomplete_mcp_call_count": parsed.get("incomplete_mcp_call_count", 0),
         "reliability_mcp_call_count": parsed.get("reliability_mcp_call_count", 0),
         "truncated_jsonl_tail": bool(parsed.get("truncated_jsonl_tail")),
-        "native_commands": parsed.get("commands", []),
+        "native_commands": _receipt_native_commands(parsed.get("commands")),
         "mcp_calls": parsed.get("mcp_calls", []),
         "skill_catalog": sorted({str(item.get("name", "")).strip() for item in skill_catalog if item.get("name")}),
         "post_condition_passed": post_condition.get("passed"),
         "post_condition_source": post_condition.get("source"),
-        "cleanup_ok": bool(cleanup_ok),
+        "protocol_contamination": bool(contamination_evidence),
+        "contamination_evidence": list(contamination_evidence),
+        "profile_cleanup_ok": bool(profile_cleanup_ok),
+        "workspace_cleanup_ok": bool(workspace_cleanup_ok),
+        "cleanup_ok": bool(profile_cleanup_ok and workspace_cleanup_ok),
     }
     for name in TOKEN_FIELDS:
         receipt[name] = (parsed.get("tokens") or {}).get(name)
@@ -686,7 +956,9 @@ def materialize_profile(
     live_hash_before = sha256_file(live_config_path)
     live = load_live_config(live_config_path)
     profile = pathlib.Path(tempfile.mkdtemp(prefix="psr-codex-profile-", dir=str(temp_parent) if temp_parent else None))
+    profile_identity = None
     try:
+        profile_identity = _filesystem_object_identity(profile)
         acl_func(profile)
         initial_text = build_profile_text(live, arm, skill_path.as_posix(), mcp_path.as_posix())
         config_path = profile / "config.toml"
@@ -708,6 +980,7 @@ def materialize_profile(
         live_hash_after = sha256_file(live_config_path)
         if live_hash_after != live_hash_before:
             raise RuntimeError("live Codex config changed during isolated profile materialization")
+        validate_profile_identity(profile, profile_identity)
         provider_name = live.get("model_provider")
         provider = (live.get("model_providers") or {}).get(provider_name) or {}
         meta = {
@@ -720,10 +993,14 @@ def materialize_profile(
             "effort": live.get("model_reasoning_effort"),
             "approval_policy": live.get("approval_policy"),
             "sandbox_mode": live.get("sandbox_mode"),
+            "_profile_filesystem_identity": profile_identity,
         }
         return profile, meta, final_skills, mcp_catalog
     except Exception:
-        remove_profile(profile)
+        if profile_identity is None:
+            remove_profile(profile)
+        else:
+            remove_profile(profile, expected_identity=profile_identity)
         raise
 
 
@@ -744,26 +1021,66 @@ def validate_case_key(case_key: str) -> str:
     return case_key
 
 
+def _is_relative_to(child: pathlib.Path, parent: pathlib.Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_runtime_topology(
+    coordinator_root: pathlib.Path,
+    runtime_root: pathlib.Path,
+    workspace: pathlib.Path,
+) -> None:
+    if _path_is_link_or_junction(runtime_root) or _path_is_link_or_junction(workspace):
+        raise ValueError("runtime root/workspace must not be a symlink or junction")
+    coordinator_root = coordinator_root.resolve(strict=False)
+    runtime_root = runtime_root.resolve(strict=False)
+    workspace = workspace.resolve(strict=False)
+    if _is_relative_to(runtime_root, coordinator_root) or _is_relative_to(coordinator_root, runtime_root):
+        raise ValueError("coordinator and runtime roots must be disjoint")
+    if workspace.parent != runtime_root:
+        raise ValueError("workspace must be a direct child of the frozen runtime root")
+
+
 def validate_manifest_row_paths(manifest_path: pathlib.Path, row: dict) -> None:
-    campaign_root = ensure_external_evidence_root(manifest_path.parent)
+    coordinator_root = ensure_external_evidence_root(manifest_path.parent)
     case_key = row.get("case_key")
     arm = row.get("arm")
     if arm not in {"S", "M"}:
         raise ValueError("manifest row must contain a valid case_key and arm")
     validate_case_key(case_key)
-    expected_prompt = (campaign_root / "prompts" / f"{case_key}.txt").resolve(strict=False)
-    expected_workspace = (campaign_root / "workspaces" / arm / case_key).resolve(strict=False)
-    for expected in (expected_prompt, expected_workspace):
-        try:
-            expected.relative_to(campaign_root)
-        except ValueError as exc:
-            raise ValueError("manifest case_key escapes the prepared campaign root") from exc
-    actual_prompt = pathlib.Path(row.get("prompt_path", "")).resolve(strict=False)
+    raw_prompt = pathlib.Path(row.get("prompt_path", ""))
+    if _path_is_link_or_junction(raw_prompt) or _path_is_link_or_junction(raw_prompt.parent):
+        raise ValueError("manifest prompt path must not be a symlink or junction")
+    expected_prompt = (coordinator_root / "prompts" / f"{case_key}.txt").resolve(strict=False)
+    actual_prompt = raw_prompt.resolve(strict=False)
     if actual_prompt != expected_prompt:
-        raise ValueError("manifest prompt path must use the prepared campaign layout")
-    actual_workspace = pathlib.Path(row.get("workspace", "")).resolve(strict=False)
-    if actual_workspace != expected_workspace:
-        raise ValueError("manifest workspace path must use the prepared campaign layout")
+        raise ValueError("manifest prompt path must use the prepared coordinator layout")
+    raw_fixture = pathlib.Path(row.get("fixture_path", ""))
+    if _path_is_link_or_junction(raw_fixture) or _path_is_link_or_junction(raw_fixture.parent):
+        raise ValueError("manifest fixture path must not be a symlink or junction")
+    expected_fixture = (coordinator_root / "fixtures" / f"{case_key}.json").resolve(strict=False)
+    actual_fixture = raw_fixture.resolve(strict=False)
+    if actual_fixture != expected_fixture:
+        raise ValueError("manifest fixture path must use the prepared coordinator layout")
+    raw_runtime_root = pathlib.Path(row.get("runtime_root", ""))
+    raw_workspace = pathlib.Path(row.get("workspace", ""))
+    if _path_is_link_or_junction(raw_runtime_root) or _path_is_link_or_junction(raw_workspace):
+        raise ValueError("manifest runtime root/workspace must not be a symlink or junction")
+    runtime_root = raw_runtime_root.resolve(strict=False)
+    workspace = raw_workspace.resolve(strict=False)
+    if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(runtime_root.name):
+        raise ValueError("manifest runtime root must end in an opaque 32-hex token")
+    if not routing_eval.OPAQUE_TOKEN_RE.fullmatch(workspace.name):
+        raise ValueError("manifest workspace must use an opaque 32-hex row token")
+    validate_runtime_topology(coordinator_root, runtime_root, workspace)
+    if routing_eval.workspace_identity(str(runtime_root)) != row.get("runtime_root_sha256"):
+        raise ValueError("runtime root identity mismatch")
+    if routing_eval.workspace_identity(str(workspace)) != row.get("workspace_sha256"):
+        raise ValueError("workspace identity mismatch")
 
 
 def load_manifest_row(path: pathlib.Path, sequence: int) -> dict:
@@ -793,11 +1110,15 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
     if mcp_hash.casefold() != args.mcp_sha256.casefold():
         raise ValueError("Reliability MCP SHA256 mismatch")
     profile = None
+    profile_identity = None
     cleanup_ok = False
     try:
         profile, meta, skills, mcp_catalog = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
+        observed_profile_identity = _filesystem_object_identity(profile)
+        profile_identity = tuple(meta.get("_profile_filesystem_identity") or observed_profile_identity) if isinstance(meta, dict) else observed_profile_identity
+        validate_profile_identity(profile, profile_identity)
         identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, meta, model=args.model, public_main_sha=args.public_main_sha)
         identity_sha = verify_or_create_campaign_identity_lock(
             args.identity_lock, identity, allow_create=bool(args.initialize_identity_lock)
@@ -821,8 +1142,8 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
         }
     finally:
         if profile is not None:
-            remove_profile(profile)
-            cleanup_ok = not profile.exists()
+            remove_profile(profile, expected_identity=profile_identity)
+            cleanup_ok = not os.path.lexists(profile)
     result["cleanup_ok"] = cleanup_ok
     args.evidence_root.mkdir(parents=True, exist_ok=True)
     output = args.evidence_root / f"profile-check-{args.arm}.json"
@@ -855,35 +1176,88 @@ def execute_run_row(
     if actual_prompt_hash != row.get("prompt_sha256"):
         raise ValueError("prompt hash mismatch")
     workspace = pathlib.Path(row["workspace"])
-    if routing_eval.workspace_identity(str(workspace)) != row.get("workspace_sha256"):
-        raise ValueError("workspace identity mismatch")
-    actual_fixture_hash = workspace_fixture_sha256(workspace)
-    if actual_fixture_hash != row.get("fixture_sha256"):
-        raise ValueError("workspace fixture SHA256 mismatch")
     ensure_evidence_outside_workspace(args.evidence_root, workspace)
+    ensure_evidence_runtime_disjoint(args.evidence_root, pathlib.Path(row["runtime_root"]))
     output_dir = args.evidence_root / f"{args.sequence:04d}-{row['case_key']}-{args.arm}"
     if output_dir.exists():
         raise FileExistsError(f"row evidence already exists: {output_dir}")
+
     profile = None
-    cleanup_ok = False
+    profile_identity = None
+    workspace_materialized = False
+    profile_cleanup_ok = False
+    workspace_cleanup_ok = False
+    runtime_boundary = None
+    cleanup_errors = []
     try:
-        profile, profile_meta, skills, _ = materialize(
-            args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
+        workspace = materialize_row_workspace(row)
+        workspace_materialized = True
+        runtime_boundary = capture_runtime_workspace_boundary(row, workspace)
+        try:
+            profile, profile_meta, skills, _ = materialize(
+                args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
+            )
+            observed_profile_identity = _filesystem_object_identity(profile)
+            profile_identity = tuple(profile_meta.get("_profile_filesystem_identity") or observed_profile_identity) if isinstance(profile_meta, dict) else observed_profile_identity
+            validate_profile_identity(profile, profile_identity)
+            identity = campaign_identity_payload(
+                cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash,
+                profile_meta, model=args.model, public_main_sha=args.public_main_sha,
+            )
+            identity_sha = verify_or_create_campaign_identity_lock(
+                args.identity_lock, identity, allow_create=False
+            )
+            output_dir.mkdir(parents=True)
+            validate_runtime_workspace_boundary(row, workspace, expected=runtime_boundary)
+        except Exception:
+            evaluate_manifest_row(row, workspace, runtime_boundary)
+            raise
+        try:
+            process_result = process_runner(
+                args.codex, workspace, profile, prompt_bytes,
+                output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout,
+                model=args.model,
+            )
+        except Exception:
+            evaluate_manifest_row(row, workspace, runtime_boundary)
+            raise
+        post_condition = evaluate_manifest_row(row, workspace, runtime_boundary)
+        parsed = json_parser(
+            output_dir / "stdout.jsonl",
+            allow_truncated_tail=bool(process_result.get("timed_out")),
         )
-        identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, profile_meta, model=args.model, public_main_sha=args.public_main_sha)
-        identity_sha = verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=False)
-        output_dir.mkdir(parents=True)
-        process_result = process_runner(
-            args.codex, workspace, profile, prompt_bytes,
-            output_dir / "stdout.jsonl", output_dir / "stderr.log", args.timeout, model=args.model,
-        )
-        parsed = json_parser(output_dir / "stdout.jsonl", allow_truncated_tail=bool(process_result.get("timed_out")))
         validate_cli_terminal_state(process_result, parsed)
-        post_condition = evaluate_manifest_row(row, workspace)
+        manifest_rows = routing_eval.trigger_eval.load_jsonl(args.manifest)
+        contamination_evidence = detect_campaign_contamination(
+            parsed, manifest_rows, row, args.manifest.parent
+        )
     finally:
         if profile is not None:
-            remove_profile(profile)
-            cleanup_ok = not profile.exists()
+            try:
+                remove_profile(profile, expected_identity=profile_identity)
+                profile_cleanup_ok = not os.path.lexists(profile)
+                if not profile_cleanup_ok:
+                    raise RuntimeError("secret-bearing profile cleanup left a residual filesystem entry")
+            except Exception as exc:
+                cleanup_errors.append(("profile", exc))
+        if workspace_materialized:
+            try:
+                if runtime_boundary is None:
+                    raise RuntimeError("runtime boundary capture unavailable; recursive workspace cleanup refused")
+                validate_runtime_workspace_boundary(row, workspace, expected=runtime_boundary)
+                remove_runtime_workspace(workspace)
+                runtime_root, _ = validate_runtime_workspace_boundary(
+                    row, workspace, expected=runtime_boundary, require_workspace=False
+                )
+                if any(runtime_root.iterdir()):
+                    raise RuntimeError("runtime root must be empty after row cleanup")
+                workspace_cleanup_ok = not os.path.lexists(workspace)
+            except Exception as exc:
+                cleanup_errors.append(("workspace", exc))
+        if cleanup_errors:
+            kinds = ", ".join(kind for kind, _ in cleanup_errors)
+            raise RuntimeError(f"row cleanup failed: {kinds}") from cleanup_errors[0][1]
+
     if sha256_file(args.live_config) != profile_meta["live_config_sha256"]:
         raise RuntimeError("live Codex config changed during automated row")
     profile_meta = dict(profile_meta)
@@ -897,8 +1271,15 @@ def execute_run_row(
         "harness_git_head": identity["harness_git_head"],
         "public_main_sha": identity["public_main_sha"],
     })
-    receipt = normalized_execution_receipt(row, process_result, parsed, profile_meta, skills, post_condition, cleanup_ok)
-    (output_dir / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    receipt = normalized_execution_receipt(
+        row, process_result, parsed, profile_meta, skills, post_condition,
+        profile_cleanup_ok, workspace_cleanup_ok, contamination_evidence,
+    )
+    (output_dir / "receipt.json").write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    if contamination_evidence:
+        raise RuntimeError("protocol contamination detected; bounded receipt preserved")
     return receipt
 
 

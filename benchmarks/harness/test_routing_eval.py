@@ -35,7 +35,13 @@ class RoutingEvalPrepareTests(unittest.TestCase):
     def test_prepare_campaign_creates_matched_s_m_pair(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            rows = routing_eval.prepare_campaign([_case()], root, trials=1, seed=7)
+            coordinator = root / "coordinator"
+            runtime_parent = root / "runtime-parent"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            rows = routing_eval.prepare_campaign(
+                [_case()], coordinator, trials=1, seed=7,
+                runtime_parent=runtime_parent, token_factory=lambda: next(tokens),
+            )
             self.assertEqual(len(rows), 2)
             self.assertEqual({row["arm"] for row in rows}, {"S", "M"})
             by_arm = {row["arm"]: row for row in rows}
@@ -43,20 +49,127 @@ class RoutingEvalPrepareTests(unittest.TestCase):
             self.assertEqual(by_arm["S"]["fixture_sha256"], by_arm["M"]["fixture_sha256"])
             self.assertNotEqual(by_arm["S"]["workspace_sha256"], by_arm["M"]["workspace_sha256"])
             self.assertEqual(by_arm["S"]["prompt_path"], by_arm["M"]["prompt_path"])
+            self.assertEqual(by_arm["S"]["fixture_path"], by_arm["M"]["fixture_path"])
             prompt = pathlib.Path(by_arm["S"]["prompt_path"]).read_text(encoding="utf-8")
             self.assertIn("[CASE-ID: R01-T01]", prompt)
+            self.assertEqual(json.loads(pathlib.Path(by_arm["S"]["fixture_path"]).read_text(encoding="utf-8")), _case()["files"])
+            runtime_root = pathlib.Path(rows[0]["runtime_root"])
+            expected_runtime_root = runtime_parent / ("1" * 32)
+            self.assertTrue(runtime_root.is_dir())
+            self.assertEqual(runtime_root.resolve(strict=False), expected_runtime_root.resolve(strict=False))
+            self.assertEqual(list(runtime_root.iterdir()), [])
+            self.assertEqual(
+                {pathlib.Path(row["workspace"]).parent.resolve(strict=False) for row in rows},
+                {runtime_root.resolve(strict=False)},
+            )
+            self.assertEqual({pathlib.Path(row["workspace"]).name for row in rows}, {"2" * 32, "3" * 32})
+            self.assertTrue(all(not pathlib.Path(row["workspace"]).exists() for row in rows))
             for forbidden in ("powershell-reliability", "Reliability MCP", "arm S", "arm M"):
                 self.assertNotIn(forbidden.lower(), prompt.lower())
             required = {
                 "case_key", "case_id", "trial_id", "lane", "group", "arm", "sequence",
-                "prompt_path", "prompt_sha256", "workspace", "workspace_sha256",
-                "fixture_sha256", "expected_first_command_fragment", "boundary_detector",
+                "prompt_path", "prompt_sha256", "fixture_path", "runtime_root", "runtime_root_sha256",
+                "workspace", "workspace_sha256", "fixture_sha256",
+                "expected_first_command_fragment", "boundary_detector",
             }
             self.assertTrue(required.issubset(by_arm["S"]))
-            for relative in ("task.ps1", "nested/input.txt"):
-                s_bytes = (pathlib.Path(by_arm["S"]["workspace"]) / relative).read_bytes()
-                m_bytes = (pathlib.Path(by_arm["M"]["workspace"]) / relative).read_bytes()
-                self.assertEqual(s_bytes, m_bytes)
+
+    def test_prepare_campaign_rejects_linked_prompt_leaf_before_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            prompt_path = coordinator / "prompts" / "R01-T01.txt"
+            prompt_path.parent.mkdir(parents=True)
+            prompt_path.write_text("preserve", encoding="utf-8")
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            real_is_symlink = pathlib.Path.is_symlink
+            def fake_is_symlink(path):
+                return path == prompt_path or real_is_symlink(path)
+            with mock.patch.object(pathlib.Path, "is_symlink", autospec=True, side_effect=fake_is_symlink):
+                with self.assertRaisesRegex(ValueError, "prompt.*symlink|junction"):
+                    routing_eval.prepare_campaign(
+                        [_case()], coordinator, trials=1, seed=7,
+                        runtime_parent=root / "runtime-parent", token_factory=lambda: next(tokens),
+                    )
+            self.assertEqual(prompt_path.read_text(encoding="utf-8"), "preserve")
+
+    def test_prepare_campaign_rejects_linked_runtime_root_before_resolve(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            runtime_parent = root / "neutral"
+            runtime_parent.mkdir()
+            raw_runtime_root = runtime_parent / ("a" * 32)
+            tokens = iter(["a" * 32, "b" * 32, "c" * 32])
+            real_resolve = pathlib.Path.resolve
+            real_link_check = routing_eval._path_is_link_or_junction
+            def is_target(path):
+                return path.name == raw_runtime_root.name and path.parent.name == runtime_parent.name
+            def fake_resolve(path, strict=False):
+                if is_target(path):
+                    raise AssertionError("linked runtime root must be rejected before resolve")
+                return real_resolve(path, strict=strict)
+            def fake_link_check(path):
+                return is_target(path) or real_link_check(path)
+            with mock.patch.object(pathlib.Path, "resolve", autospec=True, side_effect=fake_resolve):
+                with mock.patch.object(routing_eval, "_path_is_link_or_junction", side_effect=fake_link_check):
+                    with self.assertRaisesRegex(ValueError, "runtime root.*symlink|junction"):
+                        routing_eval.prepare_campaign(
+                            [_case()], coordinator, trials=1, seed=7,
+                            runtime_parent=runtime_parent, token_factory=lambda: next(tokens),
+                        )
+
+    def test_prepare_campaign_rejects_runtime_parent_inside_coordinator(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            with self.assertRaisesRegex(ValueError, "disjoint"):
+                routing_eval.prepare_campaign(
+                    [_case()], coordinator, trials=1, seed=7,
+                    runtime_parent=coordinator / "runtime",
+                    token_factory=lambda: "a" * 32,
+                )
+
+    def test_prepare_campaign_rejects_row_token_reusing_campaign_token(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["a" * 32, "a" * 32, "b" * 32])
+            with self.assertRaisesRegex(ValueError, "unique"):
+                routing_eval.prepare_campaign(
+                    [_case()], root / "coordinator", trials=1, seed=7,
+                    runtime_parent=root / "runtime-parent", token_factory=lambda: next(tokens),
+                )
+
+    def test_prepare_campaign_rolls_back_attempt_owned_state_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            coordinator.mkdir()
+            marker = coordinator / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            runtime_parent = root / "runtime-parent"
+            tokens = iter(["a" * 32, "a" * 32, "b" * 32])
+            with self.assertRaisesRegex(ValueError, "unique"):
+                routing_eval.prepare_campaign(
+                    [_case()], coordinator, trials=1, seed=7,
+                    runtime_parent=runtime_parent, token_factory=lambda: next(tokens),
+                )
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+            self.assertFalse((coordinator / "prompts").exists())
+            self.assertFalse((coordinator / "fixtures").exists())
+            self.assertFalse((coordinator / "manifest.jsonl").exists())
+            self.assertFalse((coordinator / "campaign.json").exists())
+            self.assertFalse(runtime_parent.exists())
+
+    def test_prepare_campaign_rejects_reused_opaque_row_token(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["a" * 32, "b" * 32, "b" * 32])
+            with self.assertRaisesRegex(ValueError, "unique"):
+                routing_eval.prepare_campaign(
+                    [_case()], root / "coordinator", trials=1, seed=7,
+                    runtime_parent=root / "runtime-parent", token_factory=lambda: next(tokens),
+                )
 
     def test_prepare_campaign_rejects_workspace_prompt_token(self):
         case = _case()
@@ -949,6 +1062,7 @@ class RoutingEvalReviewPostConditionEndToEndTests(unittest.TestCase):
             sessions.mkdir()
             for row in manifest:
                 workspace = pathlib.Path(row["workspace"])
+                workspace.mkdir(parents=True, exist_ok=False)
                 workspace.joinpath("result.txt").write_bytes(b"READY\n" if row["arm"] == "S" else b"STALE\n")
                 rows = _base_rollout(row["case_key"], workspace, skill_visible=row["arm"] == "S")
                 rows += _failed_command_rows()

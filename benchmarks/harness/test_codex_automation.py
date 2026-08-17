@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -251,8 +252,8 @@ class CliJsonAdapterTests(unittest.TestCase):
     def test_parse_cli_jsonl_counts_started_command_mcp_and_exact_usage(self):
         rows = [
             {"type": "thread.started", "thread_id": "thread-1"},
-            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "cmd.exe /c exit 0", "exit_code": None, "status": "in_progress"}},
-            {"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "cmd.exe /c exit 0", "exit_code": 0, "status": "completed"}},
+            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "Get-ChildItem D:\\coord", "cwd": "D:\\runtime\\abc", "exit_code": None, "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "Get-ChildItem D:\\coord", "cwd": "D:\\runtime\\abc", "exit_code": 0, "status": "completed"}},
             {"type": "item.started", "item": {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "inspect_environment", "arguments": {}, "status": "in_progress"}},
             {"type": "item.completed", "item": {"id": "m1", "type": "mcp_tool_call", "server": "psr_reliability_native", "tool": "inspect_environment", "arguments": {}, "status": "completed", "error": None}},
             {"type": "item.completed", "item": {"id": "a1", "type": "agent_message", "text": "READY"}},
@@ -264,6 +265,8 @@ class CliJsonAdapterTests(unittest.TestCase):
         self.assertEqual(parsed["native_command_count"], 1)
         self.assertEqual(parsed["mcp_call_count"], 1)
         self.assertEqual(parsed["reliability_mcp_call_count"], 1)
+        self.assertEqual(parsed["commands"][0]["command"], "Get-ChildItem D:\\coord")
+        self.assertEqual(parsed["commands"][0]["cwd"], "D:\\runtime\\abc")
         self.assertEqual(parsed["tokens"]["input_tokens"], 100)
         self.assertIsNone(parsed["tokens"]["total_tokens"])
         self.assertEqual(parsed["final_message"], "READY")
@@ -373,19 +376,116 @@ class CliJsonAdapterTests(unittest.TestCase):
             result = codex_automation.evaluate_manifest_row(manifest, workspace)
             self.assertTrue(result["passed"])
 
+    def test_evaluate_manifest_row_rejects_workspace_root_link_before_grading(self):
+        workspace = pathlib.Path("C:/opaque/runtime/row")
+        manifest = {
+            "case_id": "X1",
+            "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]},
+        }
+        with mock.patch.object(codex_automation, "_path_is_link_or_junction", return_value=True):
+            with mock.patch.object(codex_automation.routing_eval, "evaluate_workspace_state") as evaluate:
+                with self.assertRaisesRegex(ValueError, "symlink|junction"):
+                    codex_automation.evaluate_manifest_row(manifest, workspace)
+        evaluate.assert_not_called()
+
     def test_normalized_receipt_combines_process_catalog_tool_tokens_and_post_condition(self):
         manifest = {"case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "S", "sequence": 1, "prompt_sha256": "A" * 64, "workspace_sha256": "B" * 64, "fixture_sha256": "C" * 64}
         process = {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 321}
-        parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 2, "mcp_call_count": 1, "reliability_mcp_call_count": 1, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+        parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 2, "mcp_call_count": 1, "reliability_mcp_call_count": 1, "commands": [{"id": "c1", "type": "command_execution", "command": "Get-ChildItem D:\\private", "cwd": "D:\\private", "exit_code": 0, "terminal_status": "completed"}], "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
         parsed["tokens"]["input_tokens"] = 12
         profile = {"cli_version": "0.148.0-alpha.9", "cli_sha256": "D" * 64, "profile_fingerprint": "E" * 64, "mcp_sha256": "F" * 64}
-        receipt = codex_automation.normalized_execution_receipt(manifest, process, parsed, profile, [{"name": "powershell-reliability", "path": PSR_SKILL}], {"passed": True, "source": "evaluator_workspace"}, True)
+        receipt = codex_automation.normalized_execution_receipt(manifest, process, parsed, profile, [{"name": "powershell-reliability", "path": PSR_SKILL}], {"passed": True, "source": "evaluator_workspace"}, True, True)
         self.assertEqual(receipt["post_condition_passed"], True)
         self.assertEqual(receipt["reliability_mcp_call_count"], 1)
         self.assertEqual(receipt["input_tokens"], 12)
         self.assertEqual(receipt["task_wall_clock_ms"], 321)
         self.assertEqual(receipt["skill_catalog"], ["powershell-reliability"])
+        self.assertEqual(receipt["native_commands"], [{"id": "c1", "type": "command_execution", "exit_code": 0, "terminal_status": "completed"}])
+        self.assertNotIn("D:\\private", json.dumps(receipt))
+        self.assertTrue(receipt["profile_cleanup_ok"])
+        self.assertTrue(receipt["workspace_cleanup_ok"])
         self.assertTrue(receipt["cleanup_ok"])
+
+
+class ContaminationDetectionTests(unittest.TestCase):
+    def test_text_mentions_windows_path_rejects_near_prefix(self):
+        target = pathlib.Path("C:/campaign/coordinator")
+        self.assertTrue(codex_automation._text_mentions_windows_path(f"Get-ChildItem '{target}'", target))
+        self.assertTrue(codex_automation._text_mentions_windows_path(f"Get-ChildItem '{target}/fixtures/x.json'", target))
+        self.assertFalse(codex_automation._text_mentions_windows_path(f"Get-ChildItem '{target}-cache'", target))
+
+    def test_detect_campaign_contamination_resolves_coordinator_before_hashing(self):
+        relative = pathlib.Path("relative-coordinator")
+        resolved = relative.resolve(strict=False)
+        current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": "C:/runtime/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        parsed = {"commands": [{"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{resolved}'"}]}
+        evidence = codex_automation.detect_campaign_contamination(parsed, [current], current, relative)
+        self.assertEqual(evidence, [{
+            "kind": "coordinator_access", "command_id": "c1",
+            "path_sha256": codex_automation._known_path_sha256(resolved),
+        }])
+
+    def test_detect_campaign_contamination_accepts_raw_windows_alias_of_resolved_coordinator(self):
+        raw = pathlib.Path("C:/Users/RUNNER~1/AppData/Local/Temp/campaign/coordinator")
+        canonical = pathlib.Path("C:/Users/runneradmin/AppData/Local/Temp/campaign/coordinator")
+        current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": "C:/runtime/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        parsed = {"commands": [{"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{raw}'"}]}
+        real_resolve = pathlib.Path.resolve
+        def fake_resolve(path, strict=False):
+            if path == raw:
+                return canonical
+            return real_resolve(path, strict=strict)
+        with mock.patch.object(pathlib.Path, "resolve", autospec=True, side_effect=fake_resolve):
+            evidence = codex_automation.detect_campaign_contamination(parsed, [current], current, raw)
+        self.assertEqual(evidence, [{
+            "kind": "coordinator_access", "command_id": "c1",
+            "path_sha256": codex_automation._known_path_sha256(canonical),
+        }])
+
+    def test_detect_campaign_contamination_resolves_relative_peer_workspace_from_command_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            campaign = "a" * 32
+            current_workspace = root / "runtime" / campaign / ("b" * 32)
+            other_workspace = root / "runtime" / campaign / ("c" * 32)
+            current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": str(current_workspace)}
+            other = {"case_id": "X1", "trial_id": "T01", "arm": "M", "workspace": str(other_workspace)}
+            parsed = {"commands": [{"id": "c1", "type": "command_execution", "cwd": str(current_workspace), "command": "Get-ChildItem '..\\" + ("c" * 32) + "'"}]}
+            evidence = codex_automation.detect_campaign_contamination(parsed, [current, other], current, root / "coordinator")
+        self.assertEqual([item["kind"] for item in evidence], ["other_row_workspace_access"])
+
+    def test_detect_campaign_contamination_resolves_relative_coordinator_from_command_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            current_workspace = root / "runtime" / ("a" * 32) / ("b" * 32)
+            coordinator = root / "coordinator"
+            current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": str(current_workspace)}
+            parsed = {"commands": [{"id": "c1", "type": "command_execution", "cwd": str(current_workspace), "command": "Get-ChildItem '..\\..\\..\\coordinator'"}]}
+            evidence = codex_automation.detect_campaign_contamination(parsed, [current], current, coordinator)
+        self.assertEqual([item["kind"] for item in evidence], ["coordinator_access"])
+
+    def test_detect_campaign_contamination_reports_only_known_coordinator_or_other_row_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            current_workspace = root / "runtime" / ("a" * 32) / ("b" * 32)
+            other_workspace = root / "runtime" / ("a" * 32) / ("c" * 32)
+            parsed = {
+                "commands": [
+                    {"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{coordinator}'"},
+                    {"id": "c2", "type": "command_execution", "cwd": str(current_workspace), "command": "Get-ChildItem ."},
+                    {"id": "c3", "type": "command_execution", "workdir": str(other_workspace), "command": "Get-ChildItem ."},
+                ]
+            }
+            current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": str(current_workspace)}
+            other = {"case_id": "X1", "trial_id": "T01", "arm": "M", "workspace": str(other_workspace)}
+            evidence = codex_automation.detect_campaign_contamination(parsed, [current, other], current, coordinator)
+        self.assertEqual([item["kind"] for item in evidence], ["coordinator_access", "other_row_workspace_access"])
+        self.assertEqual([item["command_id"] for item in evidence], ["c1", "c3"])
+        self.assertTrue(all(set(item) == {"kind", "command_id", "path_sha256"} for item in evidence))
+        self.assertTrue(all(len(item["path_sha256"]) == 64 for item in evidence))
+        self.assertNotIn(str(coordinator), json.dumps(evidence))
+        self.assertNotIn(str(other_workspace), json.dumps(evidence))
 
 
 class RuntimeSurfaceProbeTests(unittest.TestCase):
@@ -474,6 +574,33 @@ class MaterializeProfileTests(unittest.TestCase):
             finally:
                 codex_automation.remove_profile(profile)
 
+    def test_materialize_profile_cleans_fresh_profile_when_identity_capture_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            live_path = root / "live.toml"
+            live_path.write_text(codex_automation.build_profile_text(_live_config(), "S", PSR_SKILL, PSR_MCP), encoding="utf-8")
+            with mock.patch.object(codex_automation, "_filesystem_object_identity", side_effect=RuntimeError("identity capture failed")):
+                with self.assertRaisesRegex(RuntimeError, "identity capture failed"):
+                    codex_automation.materialize_profile(
+                        live_path, "S", pathlib.Path(PSR_SKILL), pathlib.Path(PSR_MCP), pathlib.Path("C:/Codex/codex.exe"),
+                        temp_parent=root, acl_func=mock.Mock(), skill_probe=mock.Mock(), mcp_probe=mock.Mock(),
+                    )
+            self.assertEqual(list(root.glob("psr-codex-profile-*")), [])
+
+    def test_materialize_profile_cleans_partial_profile_when_probe_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            live_path = root / "live.toml"
+            live_path.write_text(codex_automation.build_profile_text(_live_config(), "S", PSR_SKILL, PSR_MCP), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                codex_automation.materialize_profile(
+                    live_path, "S", pathlib.Path(PSR_SKILL), pathlib.Path(PSR_MCP), pathlib.Path("C:/Codex/codex.exe"),
+                    temp_parent=root, acl_func=mock.Mock(), skill_probe=mock.Mock(side_effect=RuntimeError("probe failed")),
+                    mcp_probe=mock.Mock(),
+                )
+            self.assertEqual(list(root.glob("psr-codex-profile-*")), [])
+
+
 
 class CommandWorkflowTests(unittest.TestCase):
     def test_load_manifest_row_selects_exact_sequence_and_rejects_duplicates(self):
@@ -500,36 +627,66 @@ class CommandWorkflowTests(unittest.TestCase):
 
 
 class ManifestTopologyTests(unittest.TestCase):
-    def test_validate_manifest_row_paths_requires_campaign_prompt_and_workspace_layout(self):
+    def test_validate_manifest_row_paths_accepts_opaque_runtime_layout(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            manifest = root / "manifest.jsonl"
-            row = {"case_key": "X1-T01", "arm": "M", "prompt_path": str(root/"prompts"/"X1-T01.txt"), "workspace": str(root/"workspaces"/"M"/"X1-T01")}
-            codex_automation.validate_manifest_row_paths(manifest, row)
-            bad = dict(row); bad["workspace"] = str(root/".."/"elsewhere")
-            with self.assertRaisesRegex(ValueError, "workspace path"):
-                codex_automation.validate_manifest_row_paths(manifest, bad)
-            bad = dict(row); bad["prompt_path"] = str(root/"other.txt")
+            coordinator = root / "coordinator"
+            runtime_parent = root / "neutral"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                }],
+                coordinator, trials=1, seed=7, runtime_parent=runtime_parent,
+                token_factory=lambda: next(tokens),
+            )[0]
+            codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", row)
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+            bad = dict(row); bad["prompt_path"] = str(coordinator / "other.txt")
             with self.assertRaisesRegex(ValueError, "prompt path"):
-                codex_automation.validate_manifest_row_paths(manifest, bad)
+                codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", bad)
+
+            bad_fixture = dict(row); bad_fixture["fixture_path"] = str(coordinator / "other.json")
+            with self.assertRaisesRegex(ValueError, "fixture path"):
+                codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", bad_fixture)
+
             traversal = dict(row); traversal["case_key"] = "../escape"
-            traversal["prompt_path"] = str(root / "escape.txt")
-            traversal["workspace"] = str(root / "workspaces" / "escape")
             with self.assertRaisesRegex(ValueError, "case_key"):
-                codex_automation.validate_manifest_row_paths(manifest, traversal)
+                codex_automation.validate_manifest_row_paths(coordinator / "manifest.jsonl", traversal)
 
-            for case_key in ("foo:bar", "CON", "CON.txt", "NUL", "COM1", "LPT9", "foo.", "bad\x01key", "X" * 129):
-                invalid = {
-                    "case_key": case_key,
-                    "arm": "M",
-                    "prompt_path": str(root / "prompts" / f"{case_key}.txt"),
-                    "workspace": str(root / "workspaces" / "M" / case_key),
-                }
-                with self.subTest(case_key=repr(case_key)):
-                    with self.assertRaisesRegex(ValueError, "case_key"):
-                        codex_automation.validate_manifest_row_paths(manifest, invalid)
+    def test_validate_manifest_row_paths_rejects_linked_fixture_leaf(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{"case_id": "X1", "lane": "train", "group": "should_not_trigger", "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {}}],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral", token_factory=lambda: next(tokens),
+            )[0]
+            fixture = pathlib.Path(row["fixture_path"])
+            real_check = codex_automation._path_is_link_or_junction
+            with mock.patch.object(codex_automation, "_path_is_link_or_junction", side_effect=lambda path: pathlib.Path(path) == fixture or real_check(path)):
+                with self.assertRaisesRegex(ValueError, "fixture.*symlink|junction"):
+                    codex_automation.validate_manifest_row_paths(root / "coordinator" / "manifest.jsonl", row)
 
+    def test_validate_runtime_topology_rejects_nested_roots_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            runtime_root = root / "runtime" / ("a" * 32)
+            workspace = runtime_root / ("b" * 32)
+            coordinator.mkdir()
+            runtime_root.mkdir(parents=True)
+            codex_automation.validate_runtime_topology(coordinator, runtime_root, workspace)
 
+            nested_runtime = coordinator / ("c" * 32)
+            with self.assertRaisesRegex(ValueError, "disjoint"):
+                codex_automation.validate_runtime_topology(coordinator, nested_runtime, nested_runtime / ("d" * 32))
+
+            nested_coordinator = runtime_root / "coordinator"
+            with self.assertRaisesRegex(ValueError, "disjoint"):
+                codex_automation.validate_runtime_topology(nested_coordinator, runtime_root, workspace)
 
 
 class CampaignIdentityLockTests(unittest.TestCase):
@@ -547,6 +704,26 @@ class CampaignIdentityLockTests(unittest.TestCase):
             )
         self.assertEqual(payload["harness_git_head"], "1" * 40)
         self.assertEqual(payload["public_main_sha"], "2" * 40)
+
+    def test_identity_lock_concurrent_initializer_cannot_overwrite_existing_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            lock = root / "campaign-identity.json"
+            payload = {"model": "candidate", "harness_git_head": "1" * 40}
+            winner = {"model": "other", "harness_git_head": "2" * 40}
+            real_open = pathlib.Path.open
+
+            def racing_open(path, mode="r", *args, **kwargs):
+                if path.name == lock.name and mode == "x":
+                    with real_open(path, "w", encoding="utf-8", newline="\n") as handle:
+                        handle.write(json.dumps(winner, sort_keys=True) + "\n")
+                    raise FileExistsError(str(path))
+                return real_open(path, mode, *args, **kwargs)
+
+            with mock.patch.object(pathlib.Path, "open", autospec=True, side_effect=racing_open):
+                with self.assertRaisesRegex(ValueError, "campaign identity"):
+                    codex_automation.verify_or_create_campaign_identity_lock(lock, payload, allow_create=True)
+            self.assertEqual(json.loads(lock.read_text(encoding="utf-8")), winner)
 
     def test_profile_check_creates_lock_and_rejects_cli_identity_drift(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -595,6 +772,221 @@ class CampaignIdentityLockTests(unittest.TestCase):
 
 
 class RunRowWorkflowTests(unittest.TestCase):
+    def _prepared_run(self, root, post_condition=None):
+        coordinator = root / "coordinator"
+        tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+        rows = codex_automation.routing_eval.prepare_campaign(
+            [{
+                "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                "post_condition": post_condition or {"kind": "none"},
+            }],
+            coordinator, trials=1, seed=7, runtime_parent=root / "neutral",
+            token_factory=lambda: next(tokens),
+        )
+        row = next(item for item in rows if item["arm"] == "M")
+        for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
+            (root / name).write_bytes(name.encode())
+        profile = root / "secret-profile"; profile.mkdir()
+        live_hash = codex_automation.sha256_file(root / "config.toml")
+        meta = {"live_config_sha256": live_hash, "profile_fingerprint": "2" * 64, "provider": "codex_local_access", "model": "gpt-5.6-luna", "effort": "max", "approval_policy": "never", "sandbox_mode": "danger-full-access"}
+        materialize = mock.Mock(return_value=(profile, meta, [], [{"name": "psr_reliability_native", "enabled": True}]))
+        args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0" * 40, live_config=root / "config.toml", codex=root / "codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root / "codex.exe"), skill_path=root / "skill.md", skill_sha256=codex_automation.sha256_file(root / "skill.md"), mcp_path=root / "mcp.exe", mcp_sha256=codex_automation.sha256_file(root / "mcp.exe"), evidence_root=coordinator / "row-evidence", identity_lock=coordinator / "campaign-identity.json", manifest=coordinator / "manifest.jsonl", sequence=row["sequence"], timeout=360)
+        cli_identity = {"version": "0.148.0-alpha.9", "sha256": args.codex_sha256, "path": str(args.codex)}
+        identity = codex_automation.campaign_identity_payload(cli_identity, args.skill_path, args.skill_sha256, args.mcp_path, args.mcp_sha256, meta, model=args.model, public_main_sha=args.public_main_sha)
+        codex_automation.verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=True)
+        return row, args, profile, materialize, cli_identity
+
+    def test_materialize_row_workspace_creates_only_active_fixture_and_preserves_crlf(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            runtime_parent = root / "neutral"
+            content = "@echo off\r\nexit /b 0\r\n"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"},
+                    "files": {"helper.cmd": content, "nested/input.txt": "same\n"},
+                }],
+                coordinator, trials=1, seed=7, runtime_parent=runtime_parent,
+                token_factory=lambda: next(tokens),
+            )[0]
+            runtime_root = pathlib.Path(row["runtime_root"])
+            self.assertEqual(list(runtime_root.iterdir()), [])
+            workspace = codex_automation.materialize_row_workspace(row)
+            self.assertEqual(list(runtime_root.iterdir()), [workspace])
+            self.assertEqual((workspace / "helper.cmd").read_bytes(), content.encode("utf-8"))
+            self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), row["fixture_sha256"])
+
+    def test_materialize_row_workspace_rejects_tampered_workspace_outside_runtime_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"},
+                    "files": {"safe.txt": "safe"},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            outside = root / "unrelated" / ("e" * 32)
+            tampered = dict(row)
+            tampered["workspace"] = str(outside)
+            tampered["workspace_sha256"] = codex_automation.routing_eval.workspace_identity(str(outside))
+            with self.assertRaisesRegex(ValueError, "direct child"):
+                codex_automation.materialize_row_workspace(tampered)
+            self.assertFalse(outside.exists())
+            self.assertEqual(list(pathlib.Path(row["runtime_root"]).iterdir()), [])
+
+    def test_materialize_row_workspace_rejects_tampered_parent_escape_before_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"},
+                    "files": {"safe.txt": "safe"},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            fixture_path = pathlib.Path(row["fixture_path"])
+            fixture_path.write_text(json.dumps({"../escape.txt": "owned"}) + "\n", encoding="utf-8")
+            escape = pathlib.Path(row["runtime_root"]) / "escape.txt"
+            with self.assertRaisesRegex(ValueError, "fixture path"):
+                codex_automation.materialize_row_workspace(row)
+            self.assertFalse(escape.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_materialize_row_workspace_does_not_delete_workspace_won_by_race(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            workspace = pathlib.Path(row["workspace"])
+            marker = workspace / "preexisting.txt"
+            real_mkdir = pathlib.Path.mkdir
+
+            def race_mkdir(path, mode=0o777, parents=False, exist_ok=False):
+                if path == workspace:
+                    real_mkdir(path, mode=mode, parents=True, exist_ok=True)
+                    marker.write_text("preserve", encoding="utf-8")
+                    if not exist_ok:
+                        raise FileExistsError(str(path))
+                    return None
+                return real_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+            with mock.patch.object(pathlib.Path, "mkdir", autospec=True, side_effect=race_mkdir):
+                with self.assertRaises(FileExistsError):
+                    codex_automation.materialize_row_workspace(row)
+            self.assertTrue(marker.is_file())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
+    def test_materialize_row_workspace_rejects_stale_peer_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            runtime_root = pathlib.Path(row["runtime_root"])
+            (runtime_root / ("f" * 32)).mkdir()
+            with self.assertRaisesRegex(RuntimeError, "runtime root.*empty"):
+                codex_automation.materialize_row_workspace(row)
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_materialize_row_workspace_rejects_link_before_resolving_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{"case_id": "X1", "lane": "train", "group": "should_not_trigger", "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {}}],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            raw_runtime = pathlib.Path(row["runtime_root"])
+            real_resolve = pathlib.Path.resolve
+            real_is_symlink = pathlib.Path.is_symlink
+            def fake_resolve(path, strict=False):
+                if path == raw_runtime:
+                    raise AssertionError("link must be rejected before resolve")
+                return real_resolve(path, strict=strict)
+            def fake_is_symlink(path):
+                if path == raw_runtime:
+                    return True
+                return real_is_symlink(path)
+            with mock.patch.object(pathlib.Path, "resolve", autospec=True, side_effect=fake_resolve), mock.patch.object(pathlib.Path, "is_symlink", autospec=True, side_effect=fake_is_symlink):
+                with self.assertRaisesRegex(ValueError, "symlink|junction"):
+                    codex_automation.materialize_row_workspace(row)
+
+    def test_materialize_row_workspace_rejects_symlinked_runtime_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            write_fixture = mock.Mock()
+            with mock.patch.object(pathlib.Path, "is_symlink", return_value=True), mock.patch.object(codex_automation.routing_eval, "_write_fixture", write_fixture):
+                with self.assertRaisesRegex(ValueError, "symlink|junction"):
+                    codex_automation.materialize_row_workspace(row)
+            write_fixture.assert_not_called()
+
+    def test_remove_runtime_workspace_fails_closed_on_dangling_symlink(self):
+        workspace = pathlib.Path("C:/opaque/dangling")
+        with mock.patch.object(pathlib.Path, "exists", return_value=False), \
+             mock.patch.object(pathlib.Path, "is_symlink", return_value=True), \
+             mock.patch.object(pathlib.Path, "unlink") as unlink:
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                codex_automation.remove_runtime_workspace(workspace)
+        unlink.assert_called_once_with()
+
+    def test_remove_profile_refuses_regular_directory_replacement_with_expected_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            profile = root / "profile"
+            profile.mkdir()
+            expected = codex_automation._filesystem_object_identity(profile)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            (replacement / "preserve.txt").write_text("preserve", encoding="utf-8")
+            profile.rmdir()
+            replacement.rename(profile)
+            with self.assertRaisesRegex(RuntimeError, "identity"):
+                codex_automation.remove_profile(profile, expected_identity=expected)
+            self.assertEqual((profile / "preserve.txt").read_text(encoding="utf-8"), "preserve")
+
+    def test_remove_profile_fails_closed_on_dangling_symlink(self):
+        profile = pathlib.Path("C:/opaque/dangling-profile")
+        with mock.patch.object(os.path, "lexists", side_effect=[True, False]), \
+             mock.patch.object(pathlib.Path, "is_symlink", return_value=True), \
+             mock.patch.object(pathlib.Path, "unlink") as unlink:
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                codex_automation.remove_profile(profile)
+        unlink.assert_called_once_with()
+
     def test_workspace_fixture_sha256_matches_prepared_text_tree(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = pathlib.Path(temp_dir)
@@ -612,109 +1004,427 @@ class RunRowWorkflowTests(unittest.TestCase):
             expected = codex_automation.routing_eval._fixture_sha256({"helper.cmd": content})
             self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), expected)
 
+    def test_execute_run_row_refuses_recursive_cleanup_when_runtime_boundary_capture_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, _profile, _materialize, cli_identity = self._prepared_run(root)
+            remove_workspace = mock.Mock()
+            with mock.patch.object(codex_automation, "capture_runtime_workspace_boundary", side_effect=RuntimeError("boundary capture failed")), \
+                 mock.patch.object(codex_automation, "remove_runtime_workspace", remove_workspace):
+                with self.assertRaisesRegex(RuntimeError, "cleanup failed: workspace"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity),
+                    )
+            remove_workspace.assert_not_called()
+            self.assertTrue(pathlib.Path(row["workspace"]).is_dir())
+
+    def test_execute_run_row_rejects_runtime_root_replacement_before_grading_or_recursive_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            runtime_root = pathlib.Path(row["runtime_root"])
+            replaced = {"value": False}
+            real_link_check = codex_automation._path_is_link_or_junction
+            def fake_link_check(path):
+                if pathlib.Path(path) == runtime_root and replaced["value"]:
+                    return True
+                return real_link_check(path)
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                (workspace / "result.txt").write_text("READY\n", encoding="utf-8", newline="\n")
+                replaced["value"] = True
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            evaluate = mock.Mock(return_value={"passed": True, "source": "evaluator_workspace"})
+            remove_workspace = mock.Mock()
+            with mock.patch.object(codex_automation, "_path_is_link_or_junction", side_effect=fake_link_check), \
+                 mock.patch.object(codex_automation.routing_eval, "evaluate_workspace_state", evaluate), \
+                 mock.patch.object(codex_automation, "remove_runtime_workspace", remove_workspace):
+                with self.assertRaises(RuntimeError):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+                    )
+            evaluate.assert_not_called()
+            remove_workspace.assert_not_called()
+
+    def test_execute_run_row_rejects_regular_runtime_root_replacement_by_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            runtime_root = pathlib.Path(row["runtime_root"])
+            workspace = pathlib.Path(row["workspace"])
+            def process_runner(_exe, active_workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                shutil.rmtree(active_workspace)
+                runtime_root.rmdir()
+                runtime_root.mkdir()
+                workspace.mkdir()
+                (workspace / "result.txt").write_text("replacement\n", encoding="utf-8", newline="\n")
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            evaluate = mock.Mock(return_value={"passed": True, "source": "evaluator_workspace"})
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with mock.patch.object(codex_automation.routing_eval, "evaluate_workspace_state", evaluate):
+                with self.assertRaises(RuntimeError):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+                    )
+            evaluate.assert_not_called()
+            self.assertTrue((workspace / "result.txt").is_file())
+
+    def test_execute_run_row_fails_closed_when_profile_entry_remains_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(root)
+            process = mock.Mock(return_value={"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1})
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with mock.patch.object(codex_automation, "remove_profile", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "profile"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                    )
+            self.assertTrue(os.path.lexists(profile))
+
+    def test_execute_run_row_rejects_preexisting_target_workspace_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root)
+            workspace = pathlib.Path(row["workspace"])
+            workspace.mkdir()
+            marker = workspace / "unexpected.txt"
+            marker.write_text("preserve", encoding="utf-8")
+            process = mock.Mock()
+            with self.assertRaisesRegex(RuntimeError, "runtime root.*empty"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process,
+                )
+            materialize.assert_not_called()
+            process.assert_not_called()
+            self.assertTrue(marker.is_file())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
     def test_execute_run_row_rejects_mutated_fixture_before_profile_or_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            workspace = root / "workspaces" / "M" / "X1-T01"; workspace.mkdir(parents=True)
-            (workspace / "stale.txt").write_text("stale", encoding="utf-8")
-            prompt = root / "prompts" / "X1-T01.txt"; prompt.parent.mkdir(); prompt.write_text("do task\n", encoding="utf-8", newline="\n")
-            manifest = root / "manifest.jsonl"
-            row = {"sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M", "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(), "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)), "fixture_sha256": codex_automation.routing_eval._fixture_sha256({}), "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}}
-            manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            coordinator = root / "coordinator"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            rows = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                    "post_condition": {"kind": "none"},
+                }],
+                coordinator, trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )
+            row = next(item for item in rows if item["arm"] == "M")
+            pathlib.Path(row["fixture_path"]).write_text(json.dumps({"stale.txt": "stale"}) + "\n", encoding="utf-8")
             for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
                 (root / name).write_bytes(name.encode())
-            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json", manifest=manifest, sequence=1, timeout=360)
+            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0" * 40, live_config=root / "config.toml", codex=root / "codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root / "codex.exe"), skill_path=root / "skill.md", skill_sha256=codex_automation.sha256_file(root / "skill.md"), mcp_path=root / "mcp.exe", mcp_sha256=codex_automation.sha256_file(root / "mcp.exe"), evidence_root=coordinator / "row-evidence", identity_lock=coordinator / "campaign-identity.json", manifest=coordinator / "manifest.jsonl", sequence=row["sequence"], timeout=360)
             materialize = mock.Mock()
             process = mock.Mock()
             with self.assertRaisesRegex(ValueError, "fixture SHA256 mismatch"):
-                codex_automation.execute_run_row(args, verify_cli=mock.Mock(), materialize=materialize, process_runner=process)
+                codex_automation.execute_run_row(args, verify_cli=mock.Mock(return_value={"version": "0.148.0-alpha.9", "sha256": args.codex_sha256, "path": str(args.codex)}), materialize=materialize, process_runner=process)
             materialize.assert_not_called()
             process.assert_not_called()
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
 
-    def test_execute_run_row_preserves_task_failure_as_receipt_and_cleans_profile(self):
+    def test_execute_run_row_preserves_task_failure_and_cleans_workspace_and_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            workspace = root / "workspaces" / "M" / "X1-T01"; workspace.mkdir(parents=True)
-            prompt = root / "prompts" / "X1-T01.txt"; prompt.parent.mkdir(); prompt.write_text("do task\n", encoding="utf-8", newline="\n")
-            manifest = root / "manifest.jsonl"
-            row = {"sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M", "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(), "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)), "fixture_sha256": codex_automation.routing_eval._fixture_sha256({}), "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}}
-            manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            coordinator = root / "coordinator"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            rows = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                    "post_condition": {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]},
+                }],
+                coordinator, trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )
+            row = next(item for item in rows if item["arm"] == "M")
             for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
                 (root / name).write_bytes(name.encode())
             profile = root / "secret-profile"; profile.mkdir()
-            live_hash = codex_automation.sha256_file(root/"config.toml")
-            materialize = mock.Mock(return_value=(profile, {"live_config_sha256":live_hash,"profile_fingerprint":"2"*64,"provider":"codex_local_access","model":"gpt-5.6-luna","effort":"max"}, [], [{"name":"psr_reliability_native","enabled":True}]))
-            process = mock.Mock(return_value={"exit_code":0,"timed_out":False,"termination_reason":"process_exit"})
-            parsed = {"thread_id":"t","turn_status":"completed","native_command_count":1,"mcp_call_count":0,"reliability_mcp_call_count":0,"tokens":{name:None for name in codex_automation.TOKEN_FIELDS},"final_message":"done","errors":[]}
-            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"), skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=root/"campaign-identity.json", manifest=manifest, sequence=1, timeout=360)
-            cli_identity = {"version":"0.148.0-alpha.9","sha256":args.codex_sha256,"path":str(args.codex)}
-            identity = codex_automation.campaign_identity_payload(cli_identity, args.skill_path, args.skill_sha256, args.mcp_path, args.mcp_sha256, materialize.return_value[1], model=args.model, public_main_sha=args.public_main_sha)
+            live_hash = codex_automation.sha256_file(root / "config.toml")
+            meta = {"live_config_sha256": live_hash, "profile_fingerprint": "2" * 64, "provider": "codex_local_access", "model": "gpt-5.6-luna", "effort": "max", "approval_policy": "never", "sandbox_mode": "danger-full-access"}
+            materialize = mock.Mock(return_value=(profile, meta, [], [{"name": "psr_reliability_native", "enabled": True}]))
+            observed = {}
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                observed["workspace"] = workspace
+                self.assertTrue(workspace.is_dir())
+                self.assertEqual(list(workspace.parent.iterdir()), [workspace])
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 1, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0" * 40, live_config=root / "config.toml", codex=root / "codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root / "codex.exe"), skill_path=root / "skill.md", skill_sha256=codex_automation.sha256_file(root / "skill.md"), mcp_path=root / "mcp.exe", mcp_sha256=codex_automation.sha256_file(root / "mcp.exe"), evidence_root=coordinator / "row-evidence", identity_lock=coordinator / "campaign-identity.json", manifest=coordinator / "manifest.jsonl", sequence=row["sequence"], timeout=360)
+            cli_identity = {"version": "0.148.0-alpha.9", "sha256": args.codex_sha256, "path": str(args.codex)}
+            identity = codex_automation.campaign_identity_payload(cli_identity, args.skill_path, args.skill_sha256, args.mcp_path, args.mcp_sha256, meta, model=args.model, public_main_sha=args.public_main_sha)
             codex_automation.verify_or_create_campaign_identity_lock(args.identity_lock, identity, allow_create=True)
-            receipt = codex_automation.execute_run_row(args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize, process_runner=process, json_parser=mock.Mock(return_value=parsed))
+            receipt = codex_automation.execute_run_row(args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize, process_runner=process_runner, json_parser=mock.Mock(return_value=parsed))
             self.assertFalse(receipt["post_condition_passed"])
+            self.assertTrue(receipt["workspace_cleanup_ok"])
+            self.assertTrue(receipt["profile_cleanup_ok"])
+            self.assertTrue(receipt["cleanup_ok"])
             self.assertFalse(profile.exists())
-            self.assertTrue((args.evidence_root / "0001-X1-T01-M" / "receipt.json").exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+            self.assertEqual(list(pathlib.Path(row["runtime_root"]).iterdir()), [])
+            self.assertTrue((args.evidence_root / f"{row['sequence']:04d}-{row['case_key']}-M" / "receipt.json").exists())
 
-    def test_execute_run_row_rejects_identity_drift_before_output_namespace_or_model(self):
+    def test_execute_run_row_fails_cleanup_when_runtime_root_has_sibling_after_row(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            workspace = root / "workspaces" / "M" / "X1-T01"; workspace.mkdir(parents=True)
-            prompt = root / "prompts" / "X1-T01.txt"; prompt.parent.mkdir(); prompt.write_text("do task\n", encoding="utf-8", newline="\n")
-            manifest = root / "manifest.jsonl"
-            row = {"sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M", "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(), "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)), "fixture_sha256": codex_automation.routing_eval._fixture_sha256({}), "post_condition": {"kind": "none"}}
-            manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root)
+            sibling = pathlib.Path(row["runtime_root"]) / "unexpected.txt"
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                sibling.write_text("preserve", encoding="utf-8")
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            with self.assertRaisesRegex(RuntimeError, "runtime root.*empty|row cleanup failed"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+                )
+            self.assertTrue(sibling.is_file())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_rejects_replaced_profile_returned_by_materializer_before_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, _materialize, cli_identity = self._prepared_run(root)
+            original_identity = codex_automation._filesystem_object_identity(profile)
+            replacement = root / "replacement-profile"
+            replacement.mkdir()
+            (replacement / "preserve.txt").write_text("preserve", encoding="utf-8")
+            shutil.rmtree(profile)
+            replacement.rename(profile)
+            meta = {"live_config_sha256": codex_automation.sha256_file(args.live_config), "profile_fingerprint": "2" * 64, "provider": "codex_local_access", "model": "gpt-5.6-luna", "effort": "max", "_profile_filesystem_identity": original_identity}
+            materialize = mock.Mock(return_value=(profile, meta, [{"name": "powershell-reliability", "path": PSR_SKILL}], [{"name": "psr_reliability_native", "enabled": True}]))
+            process = mock.Mock()
+            with mock.patch.object(codex_automation, "verify_or_create_campaign_identity_lock", return_value="3" * 64):
+                with self.assertRaisesRegex(RuntimeError, "profile.*identity|cleanup failed: profile"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process,
+                    )
+            process.assert_not_called()
+            self.assertEqual((profile / "preserve.txt").read_text(encoding="utf-8"), "preserve")
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_preserves_replaced_profile_directory_and_fails_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(root)
+            replacement = root / "replacement-profile"
+            replacement.mkdir()
+            (replacement / "preserve.txt").write_text("preserve", encoding="utf-8")
+            def process_runner(_exe, _workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                shutil.rmtree(profile)
+                replacement.rename(profile)
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed: profile"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+                )
+            self.assertEqual((profile / "preserve.txt").read_text(encoding="utf-8"), "preserve")
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_evaluates_postcondition_before_cleanup_when_profile_setup_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "task.ps1"}]}
+            row, args, _profile, _materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            events = []
+            real_evaluate = codex_automation.evaluate_manifest_row
+            real_remove = codex_automation.remove_runtime_workspace
+            def evaluate(*items, **kwargs):
+                events.append("evaluate")
+                return real_evaluate(*items, **kwargs)
+            def remove(workspace):
+                events.append("cleanup")
+                return real_remove(workspace)
+            with mock.patch.object(codex_automation, "evaluate_manifest_row", side_effect=evaluate), \
+                 mock.patch.object(codex_automation, "remove_runtime_workspace", side_effect=remove):
+                with self.assertRaisesRegex(RuntimeError, "profile setup failed"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity),
+                        materialize=mock.Mock(side_effect=RuntimeError("profile setup failed")),
+                    )
+            self.assertEqual(events[:2], ["evaluate", "cleanup"])
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_cleans_workspace_and_profile_when_parser_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                (workspace / "result.txt").write_text("READY\n", encoding="utf-8", newline="\n")
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            evaluate = mock.Mock(side_effect=codex_automation.evaluate_manifest_row)
+            with mock.patch.object(codex_automation, "evaluate_manifest_row", evaluate):
+                with self.assertRaisesRegex(ValueError, "malformed"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process_runner, json_parser=mock.Mock(side_effect=ValueError("malformed CLI JSONL")),
+                    )
+            evaluate.assert_called_once()
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+            self.assertEqual(list(pathlib.Path(row["runtime_root"]).iterdir()), [])
+
+    def test_execute_run_row_cleans_workspace_and_profile_when_process_raises(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                (workspace / "result.txt").write_text("READY\n", encoding="utf-8", newline="\n")
+                raise RuntimeError("launch failed")
+            evaluate = mock.Mock(side_effect=codex_automation.evaluate_manifest_row)
+            with mock.patch.object(codex_automation, "evaluate_manifest_row", evaluate):
+                with self.assertRaisesRegex(RuntimeError, "launch failed"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process_runner,
+                    )
+            evaluate.assert_called_once()
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+            self.assertEqual(list(pathlib.Path(row["runtime_root"]).iterdir()), [])
+
+    def test_execute_run_row_timeout_evaluates_post_condition_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                (workspace / "result.txt").write_text("READY\n", encoding="utf-8", newline="\n")
+                return {"exit_code": 124, "timed_out": True, "termination_reason": "timeout", "task_wall_clock_ms": 10}
+            parsed = {"thread_id": "t", "turn_status": "unknown", "native_command_count": 1, "incomplete_native_command_count": 1, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": True, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": None, "errors": []}
+            receipt = codex_automation.execute_run_row(
+                args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+            )
+            self.assertTrue(receipt["timed_out"])
+            self.assertTrue(receipt["post_condition_passed"])
+            self.assertTrue(receipt["cleanup_ok"])
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_marks_bounded_protocol_contamination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(root)
+            coordinator = args.manifest.parent
+            process = mock.Mock(return_value={"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1})
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 1, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [{"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{coordinator}'", "exit_code": 0}], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with self.assertRaisesRegex(RuntimeError, "protocol contamination"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                )
+            receipt_path = args.evidence_root / f"{row['sequence']:04d}-{row['case_key']}-M" / "receipt.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertTrue(receipt["protocol_contamination"])
+            self.assertEqual([item["kind"] for item in receipt["contamination_evidence"]], ["coordinator_access"])
+            evidence_text = json.dumps(receipt["contamination_evidence"])
+            self.assertNotIn(str(coordinator), evidence_text)
+            self.assertTrue(receipt["cleanup_ok"])
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_rejects_identity_drift_and_cleans_workspace_before_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            coordinator = root / "coordinator"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            rows = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                    "post_condition": {"kind": "none"},
+                }],
+                coordinator, trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )
+            row = next(item for item in rows if item["arm"] == "M")
             for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
                 (root / name).write_bytes(name.encode())
             profile = root / "secret-profile"; profile.mkdir()
-            live_hash = codex_automation.sha256_file(root/"config.toml")
-            meta = {"live_config_sha256":live_hash,"profile_fingerprint":"2"*64,"provider":"codex_local_access","model":"gpt-5.6-luna","effort":"max","approval_policy":"never","sandbox_mode":"danger-full-access"}
-            materialize = mock.Mock(return_value=(profile, meta, [], [{"name":"psr_reliability_native","enabled":True}]))
-            cli_identity = {"version":"0.148.0-alpha.9","sha256":codex_automation.sha256_file(root/"codex.exe"),"path":str(root/"codex.exe")}
-            identity_lock = root / "campaign-identity.json"
-            drifted = codex_automation.campaign_identity_payload(cli_identity, root/"skill.md", codex_automation.sha256_file(root/"skill.md"), root/"mcp.exe", codex_automation.sha256_file(root/"mcp.exe"), meta, model="gpt-5.6-luna", public_main_sha="0"*40)
+            live_hash = codex_automation.sha256_file(root / "config.toml")
+            meta = {"live_config_sha256": live_hash, "profile_fingerprint": "2" * 64, "provider": "codex_local_access", "model": "gpt-5.6-luna", "effort": "max", "approval_policy": "never", "sandbox_mode": "danger-full-access"}
+            materialize = mock.Mock(return_value=(profile, meta, [], [{"name": "psr_reliability_native", "enabled": True}]))
+            cli_identity = {"version": "0.148.0-alpha.9", "sha256": codex_automation.sha256_file(root / "codex.exe"), "path": str(root / "codex.exe")}
+            identity_lock = coordinator / "campaign-identity.json"
+            drifted = codex_automation.campaign_identity_payload(cli_identity, root / "skill.md", codex_automation.sha256_file(root / "skill.md"), root / "mcp.exe", codex_automation.sha256_file(root / "mcp.exe"), meta, model="gpt-5.6-luna", public_main_sha="0" * 40)
             drifted["model"] = "different-model"
             codex_automation.verify_or_create_campaign_identity_lock(identity_lock, drifted, allow_create=True)
-            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=cli_identity["sha256"], skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"), mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"), evidence_root=root/"evidence", identity_lock=identity_lock, manifest=manifest, sequence=1, timeout=360)
+            args = mock.Mock(arm="M", model="gpt-5.6-luna", public_main_sha="0" * 40, live_config=root / "config.toml", codex=root / "codex.exe", codex_version="0.148.0-alpha.9", codex_sha256=cli_identity["sha256"], skill_path=root / "skill.md", skill_sha256=codex_automation.sha256_file(root / "skill.md"), mcp_path=root / "mcp.exe", mcp_sha256=codex_automation.sha256_file(root / "mcp.exe"), evidence_root=coordinator / "row-evidence", identity_lock=identity_lock, manifest=coordinator / "manifest.jsonl", sequence=row["sequence"], timeout=360)
             process = mock.Mock()
             with self.assertRaisesRegex(ValueError, "campaign identity"):
                 codex_automation.execute_run_row(args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize, process_runner=process)
             process.assert_not_called()
             self.assertFalse(profile.exists())
-            self.assertFalse((root/"evidence"/"0001-X1-T01-M").exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+            self.assertFalse((args.evidence_root / f"{row['sequence']:04d}-{row['case_key']}-M").exists())
+
+    def test_execute_run_row_rejects_evidence_root_inside_runtime_root_before_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root)
+            args.evidence_root = pathlib.Path(row["runtime_root"]) / "evidence"
+            process = mock.Mock(return_value={"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1})
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with self.assertRaisesRegex(ValueError, "evidence root.*runtime"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                )
+            process.assert_not_called()
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
 
     def test_execute_run_row_rejects_evidence_root_inside_workspace_before_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
-            workspace = root / "workspaces" / "M" / "X1-T01"
-            workspace.mkdir(parents=True)
-            prompt = root / "prompts" / "X1-T01.txt"
-            prompt.parent.mkdir()
-            prompt.write_text("do task\n", encoding="utf-8", newline="\n")
-            manifest = root / "manifest.jsonl"
-            row = {
-                "sequence": 1, "case_key": "X1-T01", "case_id": "X1", "trial_id": "T01", "arm": "M",
-                "prompt_path": str(prompt), "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest().upper(),
-                "workspace": str(workspace), "workspace_sha256": codex_automation.routing_eval.workspace_identity(str(workspace)),
-                "fixture_sha256": codex_automation.routing_eval._fixture_sha256({}),
-                "post_condition": {"kind": "none"},
-            }
-            manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            coordinator = root / "coordinator"
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            rows = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"}, "files": {},
+                    "post_condition": {"kind": "none"},
+                }],
+                coordinator, trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )
+            row = next(item for item in rows if item["arm"] == "M")
             for name in ("codex.exe", "skill.md", "mcp.exe", "config.toml"):
                 (root / name).write_bytes(name.encode())
             args = mock.Mock(
-                arm="M", model="gpt-5.6-luna", public_main_sha="0"*40, live_config=root/"config.toml", codex=root/"codex.exe",
-                codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root/"codex.exe"),
-                skill_path=root/"skill.md", skill_sha256=codex_automation.sha256_file(root/"skill.md"),
-                mcp_path=root/"mcp.exe", mcp_sha256=codex_automation.sha256_file(root/"mcp.exe"),
-                evidence_root=workspace/"evidence", identity_lock=root/"campaign-identity.json",
-                manifest=manifest, sequence=1, timeout=360,
+                arm="M", model="gpt-5.6-luna", public_main_sha="0" * 40,
+                live_config=root / "config.toml", codex=root / "codex.exe",
+                codex_version="0.148.0-alpha.9", codex_sha256=codex_automation.sha256_file(root / "codex.exe"),
+                skill_path=root / "skill.md", skill_sha256=codex_automation.sha256_file(root / "skill.md"),
+                mcp_path=root / "mcp.exe", mcp_sha256=codex_automation.sha256_file(root / "mcp.exe"),
+                evidence_root=pathlib.Path(row["workspace"]) / "evidence",
+                identity_lock=coordinator / "campaign-identity.json",
+                manifest=coordinator / "manifest.jsonl", sequence=row["sequence"], timeout=360,
             )
             with self.assertRaisesRegex(ValueError, "evidence root.*workspace"):
                 codex_automation.execute_run_row(
                     args,
-                    verify_cli=mock.Mock(return_value={"version":"0.148.0-alpha.9","sha256":args.codex_sha256,"path":str(args.codex)}),
+                    verify_cli=mock.Mock(return_value={"version": "0.148.0-alpha.9", "sha256": args.codex_sha256, "path": str(args.codex)}),
                     materialize=mock.Mock(), process_runner=mock.Mock(),
                 )
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
 
 
 
@@ -729,8 +1439,16 @@ class OperatorArtifactTests(unittest.TestCase):
         self.assertIn("ValueFromRemainingArguments", launcher_text)
         self.assertNotIn("Invoke-Expression", launcher_text)
         runbook_text = runbook.read_text(encoding="utf-8")
-        for phrase in ("profile-check", "run-row", "screening", "Windows Codex Desktop", "concurrency is 1"):
+        for phrase in ("profile-check", "run-row", "screening", "Windows Codex Desktop", "concurrency is 1", "--runtime-parent", "opaque", "leakage canary", "Before any fresh scored CLI campaign"):
             self.assertIn(phrase, runbook_text)
+        desktop_runbook = (repo / "docs" / "runbooks" / "routing-eval-desktop.md").read_text(encoding="utf-8")
+        self.assertIn("prompt_sha256", desktop_runbook)
+        self.assertIn("hashlib.sha256", desktop_runbook)
+        self.assertIn("capture_runtime_workspace_boundary", desktop_runbook)
+        self.assertGreaterEqual(desktop_runbook.count("validate_runtime_workspace_boundary"), 2)
+        self.assertIn("os.path.lexists", desktop_runbook)
+        self.assertIn("expected exactly one current-row record", desktop_runbook)
+        self.assertIn("wrong row collected", desktop_runbook)
 
     def test_verify_local_runs_and_compiles_automation_tests(self):
         repo = pathlib.Path(__file__).resolve().parents[2]

@@ -4,6 +4,9 @@ import hashlib
 import json
 import pathlib
 import random
+import re
+import secrets
+import tempfile
 import statistics
 import stat
 from collections import defaultdict
@@ -145,10 +148,19 @@ def _validate_case(case: dict) -> None:
     _fixture_sha256(files)
 
 
+def _path_is_link_or_junction(path: pathlib.Path) -> bool:
+    is_junction = getattr(path, "is_junction", lambda: False)
+    return path.is_symlink() or bool(is_junction())
+
+
 def _write_fixture(workspace: pathlib.Path, files: dict[str, str]) -> None:
-    workspace.mkdir(parents=True, exist_ok=True)
+    if not workspace.is_dir():
+        raise ValueError("fixture workspace must already exist")
     for relative, content in files.items():
-        target = workspace / pathlib.PurePosixPath(relative.replace("\\", "/"))
+        try:
+            target = _resolved_workspace_target(workspace, relative)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"fixture path must stay relative: {relative!r}") from exc
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8", newline="\n")
 
@@ -165,7 +177,32 @@ def _render_prompt(case: dict, case_key: str, trial_id: str) -> str:
     return prompt
 
 
-def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, seed: int) -> list[dict]:
+OPAQUE_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _opaque_token(token_factory=None) -> str:
+    value = (token_factory or (lambda: secrets.token_hex(16)))()
+    if not isinstance(value, str) or not OPAQUE_TOKEN_RE.fullmatch(value):
+        raise ValueError("opaque runtime token must be exactly 32 lowercase hex characters")
+    return value
+
+
+def _path_is_relative_to(child: pathlib.Path, parent: pathlib.Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _prepare_campaign_impl(
+    cases: list[dict],
+    output_root: pathlib.Path,
+    trials: int,
+    seed: int,
+    runtime_parent: pathlib.Path | None = None,
+    token_factory=None,
+) -> list[dict]:
     if trials < 1:
         raise ValueError("trials must be at least 1")
     if not cases:
@@ -176,12 +213,33 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
         if case["case_id"] in seen_ids:
             raise ValueError(f"duplicate case_id {case['case_id']}")
         seen_ids.add(case["case_id"])
+    output_root = output_root.resolve(strict=False)
+    runtime_parent = (runtime_parent or pathlib.Path(tempfile.gettempdir())).resolve(strict=False)
+    campaign_token = _opaque_token(token_factory)
+    raw_runtime_root = runtime_parent / campaign_token
+    if _path_is_link_or_junction(raw_runtime_root):
+        raise ValueError("runtime root must not be a symlink or junction")
+    if raw_runtime_root.exists():
+        raise ValueError("opaque runtime root must be new and empty")
+    runtime_root = raw_runtime_root.resolve(strict=False)
+    if runtime_root.parent != runtime_parent:
+        raise ValueError("runtime root must remain a direct child of the neutral runtime parent")
+    if _path_is_relative_to(runtime_root, output_root) or _path_is_relative_to(output_root, runtime_root):
+        raise ValueError("coordinator and runtime roots must be disjoint")
     prompts_dir = output_root / "prompts"
-    workspaces_dir = output_root / "workspaces"
+    fixtures_dir = output_root / "fixtures"
     prompts_dir.mkdir(parents=True, exist_ok=True)
-    workspaces_dir.mkdir(parents=True, exist_ok=True)
+    fixtures_dir.mkdir(parents=True, exist_ok=True)
+    if _path_is_link_or_junction(prompts_dir) or _path_is_link_or_junction(fixtures_dir):
+        raise ValueError("coordinator prompt/fixture directories must not be symlinks or junctions")
+    runtime_parent.mkdir(parents=True, exist_ok=True)
+    try:
+        runtime_root.mkdir()
+    except FileExistsError as exc:
+        raise ValueError("opaque runtime root must be new and empty") from exc
     rng = random.Random(seed)
     manifest = []
+    used_row_tokens = {campaign_token}
     for trial_number in range(1, trials + 1):
         trial_id = f"T{trial_number:02d}"
         round_cases = list(cases)
@@ -190,13 +248,23 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
             case_key = f"{case['case_id']}-{trial_id}"
             prompt = _render_prompt(case, case_key, trial_id)
             prompt_path = prompts_dir / f"{case_key}.txt"
+            if _path_is_link_or_junction(prompt_path):
+                raise ValueError("coordinator prompt leaf must not be a symlink or junction")
             prompt_path.write_text(prompt, encoding="utf-8", newline="\n")
-            fixture_hash = _fixture_sha256(case.get("files") or {})
+            files = case.get("files") or {}
+            fixture_hash = _fixture_sha256(files)
+            fixture_path = fixtures_dir / f"{case_key}.json"
+            if _path_is_link_or_junction(fixture_path):
+                raise ValueError("coordinator fixture leaf must not be a symlink or junction")
+            fixture_path.write_text(json.dumps(files, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
             first_arm = "S" if (pair_index + trial_number) % 2 == 0 else "M"
             arms = (first_arm, "M" if first_arm == "S" else "S")
             for arm in arms:
-                workspace = workspaces_dir / arm / case_key
-                _write_fixture(workspace, case.get("files") or {})
+                row_token = _opaque_token(token_factory)
+                if row_token in used_row_tokens:
+                    raise ValueError("opaque row tokens must be unique within a campaign")
+                used_row_tokens.add(row_token)
+                workspace = runtime_root / row_token
                 post_condition = _post_condition_rule(case)
                 if post_condition["kind"] == "workspace_state":
                     for check in post_condition["checks"]:
@@ -211,6 +279,9 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
                     "title": case.get("title"),
                     "prompt_path": str(prompt_path),
                     "prompt_sha256": trigger_eval._sha256_text(prompt),
+                    "fixture_path": str(fixture_path),
+                    "runtime_root": str(runtime_root),
+                    "runtime_root_sha256": workspace_identity(str(runtime_root)),
                     "workspace": str(workspace),
                     "workspace_sha256": workspace_identity(str(workspace)),
                     "fixture_sha256": fixture_hash,
@@ -225,9 +296,101 @@ def prepare_campaign(cases: list[dict], output_root: pathlib.Path, trials: int, 
     summary["case_count"] = len(cases)
     summary["trials_per_case"] = trials
     summary["seed"] = seed
+    summary["runtime_root"] = str(runtime_root)
+    summary["runtime_root_sha256"] = workspace_identity(str(runtime_root))
     campaign_path = output_root / "campaign.json"
     campaign_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return manifest
+
+
+def prepare_campaign(
+    cases: list[dict],
+    output_root: pathlib.Path,
+    trials: int,
+    seed: int,
+    runtime_parent: pathlib.Path | None = None,
+    token_factory=None,
+) -> list[dict]:
+    resolved_output = output_root.resolve(strict=False)
+    resolved_runtime_parent = (runtime_parent or pathlib.Path(tempfile.gettempdir())).resolve(strict=False)
+    prompts_dir = resolved_output / "prompts"
+    fixtures_dir = resolved_output / "fixtures"
+    manifest_path = resolved_output / "manifest.jsonl"
+    campaign_path = resolved_output / "campaign.json"
+    output_existed = resolved_output.exists()
+    prompts_existed = prompts_dir.exists()
+    fixtures_existed = fixtures_dir.exists()
+    runtime_parent_existed = resolved_runtime_parent.exists()
+    for label, directory in (("prompt", prompts_dir), ("fixture", fixtures_dir)):
+        if directory.exists():
+            if _path_is_link_or_junction(directory) or not directory.is_dir() or any(directory.iterdir()):
+                raise ValueError(
+                    f"coordinator {label} outputs must be new; preexisting files/symlinks/junctions are not allowed"
+                )
+    for label, path in (("manifest", manifest_path), ("campaign", campaign_path)):
+        if _path_is_link_or_junction(path) or path.exists():
+            raise ValueError(f"coordinator {label} output must not already exist")
+
+    state = {"tokens": [], "runtime_root": None, "runtime_root_existed": False}
+    actual_factory = token_factory or (lambda: secrets.token_hex(16))
+
+    def tracked_token_factory():
+        value = actual_factory()
+        state["tokens"].append(value)
+        if len(state["tokens"]) == 1 and isinstance(value, str) and OPAQUE_TOKEN_RE.fullmatch(value):
+            runtime_root = resolved_runtime_parent / value
+            state["runtime_root"] = runtime_root
+            state["runtime_root_existed"] = runtime_root.exists() or _path_is_link_or_junction(runtime_root)
+        return value
+
+    try:
+        return _prepare_campaign_impl(
+            cases, output_root, trials, seed,
+            runtime_parent=runtime_parent, token_factory=tracked_token_factory,
+        )
+    except Exception as exc:
+        rollback_errors = []
+        for path in (campaign_path, manifest_path):
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception as cleanup_exc:
+                rollback_errors.append((str(path), cleanup_exc))
+        for directory, existed in ((fixtures_dir, fixtures_existed), (prompts_dir, prompts_existed)):
+            try:
+                if directory.exists():
+                    for child in list(directory.iterdir()):
+                        if child.is_file() or child.is_symlink():
+                            child.unlink()
+                        else:
+                            raise RuntimeError(f"unexpected coordinator rollback child: {child}")
+                    if not existed:
+                        directory.rmdir()
+            except Exception as cleanup_exc:
+                rollback_errors.append((str(directory), cleanup_exc))
+        runtime_root = state["runtime_root"]
+        if runtime_root is not None and not state["runtime_root_existed"]:
+            try:
+                if runtime_root.exists():
+                    runtime_root.rmdir()
+            except Exception as cleanup_exc:
+                rollback_errors.append((str(runtime_root), cleanup_exc))
+        if not runtime_parent_existed:
+            try:
+                if resolved_runtime_parent.exists() and not any(resolved_runtime_parent.iterdir()):
+                    resolved_runtime_parent.rmdir()
+            except Exception as cleanup_exc:
+                rollback_errors.append((str(resolved_runtime_parent), cleanup_exc))
+        if not output_existed:
+            try:
+                if resolved_output.exists() and not any(resolved_output.iterdir()):
+                    resolved_output.rmdir()
+            except Exception as cleanup_exc:
+                rollback_errors.append((str(resolved_output), cleanup_exc))
+        if rollback_errors:
+            locations = ", ".join(location for location, _ in rollback_errors)
+            raise RuntimeError(f"campaign preparation rollback failed: {locations}") from exc
+        raise
 
 
 def _catalog_observation(rows: list[dict]) -> tuple[bool, bool]:
@@ -1118,6 +1281,7 @@ def main(argv=None) -> int:
     prepare.add_argument("--cases", type=pathlib.Path, required=True)
     prepare.add_argument("--output-root", type=pathlib.Path, required=True)
     prepare.add_argument("--trials", type=int, default=3)
+    prepare.add_argument("--runtime-parent", type=pathlib.Path)
     prepare.add_argument("--seed", type=int, default=20260813)
 
     collect = sub.add_parser("collect")
@@ -1133,7 +1297,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
-            manifest = prepare_campaign(load_cases(args.cases), args.output_root, args.trials, args.seed)
+            manifest = prepare_campaign(load_cases(args.cases), args.output_root, args.trials, args.seed, runtime_parent=args.runtime_parent)
             result = {
                 "prepared_trials": len(manifest),
                 "manifest": str(args.output_root / "manifest.jsonl"),
