@@ -198,8 +198,18 @@ _QUOTE_OPEN_BOUNDARIES = set(":=({[,;|&<>")
 
 def _normalize_match_quotes(value: str) -> str:
     chars = []
+    in_double_quotes = False
     for char in value:
-        if char in "\"'":
+        if char == '"':
+            previous = chars[-1] if chars else ""
+            if not chars or previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES:
+                chars.append(" ")
+            in_double_quotes = not in_double_quotes
+            continue
+        if char == "'":
+            if in_double_quotes:
+                chars.append(char)
+                continue
             previous = chars[-1] if chars else ""
             if not chars or previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES:
                 chars.append(" ")
