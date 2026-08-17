@@ -290,9 +290,17 @@ def build_profile_text(
     if arm not in {"S", "M"}:
         raise ValueError("arm must be S or M")
     provider_name = live.get("model_provider")
-    provider = (live.get("model_providers") or {}).get(provider_name)
-    if not isinstance(provider, dict):
-        raise ValueError("selected model provider table is missing")
+    provider_tables = live.get("model_providers")
+    if provider_tables is None or (isinstance(provider_tables, dict) and provider_name not in provider_tables):
+        if provider_name != "openai":
+            raise ValueError("selected model provider table is missing")
+        provider = None
+    else:
+        if not isinstance(provider_tables, dict):
+            raise ValueError("selected model provider table is missing")
+        provider = provider_tables.get(provider_name)
+        if not isinstance(provider, dict):
+            raise ValueError("selected model provider table is missing")
     mcp = (live.get("mcp_servers") or {}).get("psr_reliability_native")
     if not isinstance(mcp, dict):
         raise ValueError("psr_reliability_native MCP config is missing")
@@ -304,9 +312,10 @@ def build_profile_text(
     lines.extend(["", "[features]", "plugins = false", "apps = false", "remote_plugin = false", "plugin_sharing = false"])
     if (live.get("features") or {}).get("fast_mode") is not None:
         lines.append(f"fast_mode = {_toml_literal(bool(live['features']['fast_mode']))}")
-    lines.extend(["", f"[model_providers.{provider_name}]"])
-    for key, value in provider.items():
-        lines.append(f"{key} = {_toml_literal(value)}")
+    if provider is not None:
+        lines.extend(["", f"[model_providers.{provider_name}]"])
+        for key, value in provider.items():
+            lines.append(f"{key} = {_toml_literal(value)}")
 
     lines.extend(["", "[mcp_servers.psr_reliability_native]"])
     lines.append(f"command = {_toml_literal(mcp_path)}")
