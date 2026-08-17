@@ -993,6 +993,11 @@ def materialize_profile(
     try:
         profile_identity = _filesystem_object_identity(profile)
         acl_func(profile)
+        if live.get("model_provider") == "openai":
+            auth_path = live_config_path.parent / "auth.json"
+            if _path_is_link_or_junction(auth_path) or not auth_path.is_file():
+                raise ValueError("built-in openai auth.json must be a regular file")
+            shutil.copyfile(auth_path, profile / "auth.json")
         initial_text = build_profile_text(live, arm, skill_path.as_posix(), mcp_path.as_posix())
         config_path = profile / "config.toml"
         config_path.write_text(initial_text, encoding="utf-8", newline="\n")
