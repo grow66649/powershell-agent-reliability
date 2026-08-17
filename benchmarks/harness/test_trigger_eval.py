@@ -357,6 +357,11 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
 
 
+    def test_structured_wrapper_requires_admitted_top_level_context(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "foo(tools.shell_command({command:'helper.cmd'}))"))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", "// tools.shell_command({command:'helper.cmd'})"))
+
+
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):
         case = {"case_id": "C01", "group": "should_trigger", "title": "failure", "prompt": "Do task", "expected_first_command_fragment": 123}

@@ -224,6 +224,9 @@ def _command_component_char(value: str) -> bool:
 _STRUCTURED_TOOL_START_RE = re.compile(
     r"tools\.(shell_command|exec_command)\s*\(\s*\{"
 )
+_STRUCTURED_AWAIT_PREFIX_RE = re.compile(
+    r"(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*=\s*await"
+)
 _STRUCTURED_SCALAR_RE = re.compile(
     r"(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)"
 )
@@ -244,6 +247,13 @@ def _quote_is_escaped(value: str, index: int, start: int) -> bool:
     return backslashes % 2 == 1
 
 
+def _structured_start_prefix_is_admitted(value: str, start: int) -> bool:
+    prefix = value[:start].strip()
+    if not prefix or prefix == "await":
+        return True
+    return _STRUCTURED_AWAIT_PREFIX_RE.fullmatch(prefix) is not None
+
+
 def _structured_tool_starts(value: str) -> list[re.Match]:
     matches = []
     quote = None
@@ -262,12 +272,10 @@ def _structured_tool_starts(value: str) -> list[re.Match]:
             index += 1
             continue
         match = _STRUCTURED_TOOL_START_RE.match(value, index)
-        if match is not None:
-            previous = value[index - 1] if index > 0 else ""
-            if not previous or (not (previous.isalnum() or previous in "_$.")):
-                matches.append(match)
-                index = match.end()
-                continue
+        if match is not None and _structured_start_prefix_is_admitted(value, index):
+            matches.append(match)
+            index = match.end()
+            continue
         index += 1
     return matches
 
