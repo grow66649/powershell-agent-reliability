@@ -258,6 +258,8 @@ def attach_manifest(records: list[dict], manifest: list[dict]) -> list[dict]:
 
 
 def collect_rollouts(sessions_root: pathlib.Path, manifest: list[dict]) -> list[dict]:
+    for row in manifest:
+        validate_expected_first_command_fragment(row.get("expected_first_command_fragment"))
     known = {row["case_key"] for row in manifest}
     records = []
     seen = set()

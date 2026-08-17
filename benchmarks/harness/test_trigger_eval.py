@@ -106,6 +106,15 @@ class TriggerEvalCampaignTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "first command"):
                     trigger_eval.attach_manifest([record], manifest)
 
+    def test_collect_rejects_malformed_manifest_expectation_without_rollout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            for value in ("   ", 123):
+                with self.subTest(value=value):
+                    manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": value}]
+                    with self.assertRaisesRegex(ValueError, "first command"):
+                        trigger_eval.collect_rollouts(root, manifest)
+
     def test_attach_manifest_labels_collected_records(self):
         manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_trigger", "title": "failure", "expected_first_command_fragment": "pwsh.exe"}]
         record = {"case_key": "C01-T01", "psr_skill_selected": True, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 1, "selected_other_skills": [], "first_command_input": "tools.shell_command pwsh.exe"}
