@@ -151,7 +151,10 @@ def _validate_case(case: dict) -> None:
 def _write_fixture(workspace: pathlib.Path, files: dict[str, str]) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     for relative, content in files.items():
-        target = workspace / pathlib.PurePosixPath(relative.replace("\\", "/"))
+        try:
+            target = _resolved_workspace_target(workspace, relative)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"fixture path must stay relative: {relative!r}") from exc
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8", newline="\n")
 
@@ -221,7 +224,7 @@ def prepare_campaign(
         raise ValueError("opaque runtime root must be new and empty") from exc
     rng = random.Random(seed)
     manifest = []
-    used_row_tokens = set()
+    used_row_tokens = {campaign_token}
     for trial_number in range(1, trials + 1):
         trial_id = f"T{trial_number:02d}"
         round_cases = list(cases)

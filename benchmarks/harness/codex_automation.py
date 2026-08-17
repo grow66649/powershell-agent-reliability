@@ -151,8 +151,8 @@ def materialize_row_workspace(row: dict) -> pathlib.Path:
         raise ValueError("frozen fixture payload is unreadable") from exc
     if not isinstance(files, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in files.items()):
         raise ValueError("frozen fixture payload must map text paths to text content")
-    routing_eval._write_fixture(workspace, files)
     try:
+        routing_eval._write_fixture(workspace, files)
         actual_hash = workspace_fixture_sha256(workspace)
         if actual_hash != row.get("fixture_sha256"):
             raise ValueError("workspace fixture SHA256 mismatch")
@@ -164,9 +164,20 @@ def materialize_row_workspace(row: dict) -> pathlib.Path:
 
 
 def remove_runtime_workspace(workspace: pathlib.Path) -> None:
-    if workspace.exists():
+    is_junction = getattr(workspace, "is_junction", lambda: False)
+    if workspace.is_symlink():
+        workspace.unlink()
+        if os.path.lexists(workspace):
+            raise RuntimeError(f"runtime workspace cleanup failed: {workspace}")
+        raise RuntimeError("runtime workspace became a symlink during cleanup")
+    if is_junction():
+        workspace.rmdir()
+        if os.path.lexists(workspace):
+            raise RuntimeError(f"runtime workspace cleanup failed: {workspace}")
+        raise RuntimeError("runtime workspace became a junction during cleanup")
+    if os.path.lexists(workspace):
         shutil.rmtree(workspace)
-    if workspace.exists():
+    if os.path.lexists(workspace):
         raise RuntimeError(f"runtime workspace cleanup failed: {workspace}")
 
 

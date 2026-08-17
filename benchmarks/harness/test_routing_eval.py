@@ -80,6 +80,16 @@ class RoutingEvalPrepareTests(unittest.TestCase):
                     token_factory=lambda: "a" * 32,
                 )
 
+    def test_prepare_campaign_rejects_row_token_reusing_campaign_token(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["a" * 32, "a" * 32, "b" * 32])
+            with self.assertRaisesRegex(ValueError, "unique"):
+                routing_eval.prepare_campaign(
+                    [_case()], root / "coordinator", trials=1, seed=7,
+                    runtime_parent=root / "runtime-parent", token_factory=lambda: next(tokens),
+                )
+
     def test_prepare_campaign_rejects_reused_opaque_row_token(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)

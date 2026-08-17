@@ -93,7 +93,7 @@ Raw CLI stdout JSONL and stderr remain under the host-local evidence root. Norma
 
 ## Non-scored leakage canary
 
-After any row-isolation implementation change and before a fresh scored denominator, run one non-scored leakage canary through the exact automation path. It must prove all of the following:
+Before any fresh scored CLI campaign or denominator, run one non-scored leakage canary through the exact automation path. This is required even when the row-isolation implementation is unchanged from the previous campaign. It must prove all of the following:
 
 1. the model-visible cwd and its runtime ancestors contain no S/M, case, lane, Skill/MCP, evaluator, or campaign-purpose label;
 2. the opaque runtime root contains exactly one active row during execution and is empty afterward;

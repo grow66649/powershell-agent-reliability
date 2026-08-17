@@ -690,6 +690,27 @@ class RunRowWorkflowTests(unittest.TestCase):
             self.assertEqual((workspace / "helper.cmd").read_bytes(), content.encode("utf-8"))
             self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), row["fixture_sha256"])
 
+    def test_materialize_row_workspace_rejects_tampered_parent_escape_before_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tokens = iter(["1" * 32, "2" * 32, "3" * 32])
+            row = codex_automation.routing_eval.prepare_campaign(
+                [{
+                    "case_id": "X1", "lane": "train", "group": "should_not_trigger",
+                    "prompt": "do task", "boundary_detector": {"kind": "none"},
+                    "files": {"safe.txt": "safe"},
+                }],
+                root / "coordinator", trials=1, seed=7, runtime_parent=root / "neutral",
+                token_factory=lambda: next(tokens),
+            )[0]
+            fixture_path = pathlib.Path(row["fixture_path"])
+            fixture_path.write_text(json.dumps({"../escape.txt": "owned"}) + "\n", encoding="utf-8")
+            escape = pathlib.Path(row["runtime_root"]) / "escape.txt"
+            with self.assertRaisesRegex(ValueError, "fixture path"):
+                codex_automation.materialize_row_workspace(row)
+            self.assertFalse(escape.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
     def test_materialize_row_workspace_rejects_stale_peer_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -725,6 +746,15 @@ class RunRowWorkflowTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "symlink|junction"):
                     codex_automation.materialize_row_workspace(row)
             write_fixture.assert_not_called()
+
+    def test_remove_runtime_workspace_fails_closed_on_dangling_symlink(self):
+        workspace = pathlib.Path("C:/opaque/dangling")
+        with mock.patch.object(pathlib.Path, "exists", return_value=False), \
+             mock.patch.object(pathlib.Path, "is_symlink", return_value=True), \
+             mock.patch.object(pathlib.Path, "unlink") as unlink:
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                codex_automation.remove_runtime_workspace(workspace)
+        unlink.assert_called_once_with()
 
     def test_workspace_fixture_sha256_matches_prepared_text_tree(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -980,7 +1010,7 @@ class OperatorArtifactTests(unittest.TestCase):
         self.assertIn("ValueFromRemainingArguments", launcher_text)
         self.assertNotIn("Invoke-Expression", launcher_text)
         runbook_text = runbook.read_text(encoding="utf-8")
-        for phrase in ("profile-check", "run-row", "screening", "Windows Codex Desktop", "concurrency is 1", "--runtime-parent", "opaque", "leakage canary"):
+        for phrase in ("profile-check", "run-row", "screening", "Windows Codex Desktop", "concurrency is 1", "--runtime-parent", "opaque", "leakage canary", "Before any fresh scored CLI campaign"):
             self.assertIn(phrase, runbook_text)
 
     def test_verify_local_runs_and_compiles_automation_tests(self):
