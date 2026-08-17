@@ -424,7 +424,7 @@ def verify_cli_identity(exe: pathlib.Path, expected_version: str, expected_sha25
 
 
 def codex_argv(exe: pathlib.Path, workspace: pathlib.Path, model: str | None = None) -> list[str]:
-    argv = [exe.as_posix(), "exec", "--ephemeral", "--json"]
+    argv = [exe.as_posix(), "exec", "--ephemeral", "--json", "--skip-git-repo-check"]
     if model:
         argv.extend(["--model", model])
     argv.extend(["-C", workspace.as_posix(), "-"])
