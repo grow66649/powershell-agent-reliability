@@ -950,9 +950,24 @@ class RunRowWorkflowTests(unittest.TestCase):
                 codex_automation.remove_runtime_workspace(workspace)
         unlink.assert_called_once_with()
 
+    def test_remove_profile_refuses_regular_directory_replacement_with_expected_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            profile = root / "profile"
+            profile.mkdir()
+            expected = codex_automation._filesystem_object_identity(profile)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            (replacement / "preserve.txt").write_text("preserve", encoding="utf-8")
+            profile.rmdir()
+            replacement.rename(profile)
+            with self.assertRaisesRegex(RuntimeError, "identity"):
+                codex_automation.remove_profile(profile, expected_identity=expected)
+            self.assertEqual((profile / "preserve.txt").read_text(encoding="utf-8"), "preserve")
+
     def test_remove_profile_fails_closed_on_dangling_symlink(self):
         profile = pathlib.Path("C:/opaque/dangling-profile")
-        with mock.patch.object(os.path, "lexists", return_value=False), \
+        with mock.patch.object(os.path, "lexists", side_effect=[True, False]), \
              mock.patch.object(pathlib.Path, "is_symlink", return_value=True), \
              mock.patch.object(pathlib.Path, "unlink") as unlink:
             with self.assertRaisesRegex(RuntimeError, "symlink"):
@@ -1148,6 +1163,73 @@ class RunRowWorkflowTests(unittest.TestCase):
                     process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
                 )
             self.assertTrue(sibling.is_file())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_rejects_replaced_profile_returned_by_materializer_before_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, _materialize, cli_identity = self._prepared_run(root)
+            original_identity = codex_automation._filesystem_object_identity(profile)
+            replacement = root / "replacement-profile"
+            replacement.mkdir()
+            (replacement / "preserve.txt").write_text("preserve", encoding="utf-8")
+            shutil.rmtree(profile)
+            replacement.rename(profile)
+            meta = {"live_config_sha256": codex_automation.sha256_file(args.live_config), "profile_fingerprint": "2" * 64, "provider": "codex_local_access", "model": "gpt-5.6-luna", "effort": "max", "_profile_filesystem_identity": original_identity}
+            materialize = mock.Mock(return_value=(profile, meta, [{"name": "powershell-reliability", "path": PSR_SKILL}], [{"name": "psr_reliability_native", "enabled": True}]))
+            process = mock.Mock()
+            with mock.patch.object(codex_automation, "verify_or_create_campaign_identity_lock", return_value="3" * 64):
+                with self.assertRaisesRegex(RuntimeError, "profile.*identity|cleanup failed: profile"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process,
+                    )
+            process.assert_not_called()
+            self.assertEqual((profile / "preserve.txt").read_text(encoding="utf-8"), "preserve")
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_preserves_replaced_profile_directory_and_fails_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(root)
+            replacement = root / "replacement-profile"
+            replacement.mkdir()
+            (replacement / "preserve.txt").write_text("preserve", encoding="utf-8")
+            def process_runner(_exe, _workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                shutil.rmtree(profile)
+                replacement.rename(profile)
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed: profile"):
+                codex_automation.execute_run_row(
+                    args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                    process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+                )
+            self.assertEqual((profile / "preserve.txt").read_text(encoding="utf-8"), "preserve")
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
+    def test_execute_run_row_evaluates_postcondition_before_cleanup_when_profile_setup_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "task.ps1"}]}
+            row, args, _profile, _materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            events = []
+            real_evaluate = codex_automation.evaluate_manifest_row
+            real_remove = codex_automation.remove_runtime_workspace
+            def evaluate(*items, **kwargs):
+                events.append("evaluate")
+                return real_evaluate(*items, **kwargs)
+            def remove(workspace):
+                events.append("cleanup")
+                return real_remove(workspace)
+            with mock.patch.object(codex_automation, "evaluate_manifest_row", side_effect=evaluate), \
+                 mock.patch.object(codex_automation, "remove_runtime_workspace", side_effect=remove):
+                with self.assertRaisesRegex(RuntimeError, "profile setup failed"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity),
+                        materialize=mock.Mock(side_effect=RuntimeError("profile setup failed")),
+                    )
+            self.assertEqual(events[:2], ["evaluate", "cleanup"])
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
 
     def test_execute_run_row_cleans_workspace_and_profile_when_parser_fails(self):

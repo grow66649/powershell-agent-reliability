@@ -422,7 +422,26 @@ def codex_argv(exe: pathlib.Path, workspace: pathlib.Path, model: str | None = N
     return argv
 
 
-def remove_profile(profile: pathlib.Path) -> None:
+def validate_profile_identity(profile: pathlib.Path, expected_identity) -> None:
+    if not os.path.lexists(profile):
+        raise RuntimeError("secret-bearing profile is missing")
+    if _path_is_link_or_junction(profile):
+        raise RuntimeError("secret-bearing profile filesystem identity changed")
+    if _filesystem_object_identity(profile) != tuple(expected_identity):
+        raise RuntimeError("secret-bearing profile filesystem identity changed")
+    if not profile.is_dir():
+        raise RuntimeError("secret-bearing profile is no longer a directory")
+
+
+def remove_profile(profile: pathlib.Path, expected_identity=None) -> None:
+    if not os.path.lexists(profile):
+        return
+    if expected_identity is not None:
+        validate_profile_identity(profile, expected_identity)
+        shutil.rmtree(profile)
+        if os.path.lexists(profile):
+            raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
+        return
     is_junction = getattr(profile, "is_junction", lambda: False)
     if profile.is_symlink():
         profile.unlink()
@@ -434,8 +453,7 @@ def remove_profile(profile: pathlib.Path) -> None:
         if os.path.lexists(profile):
             raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
         raise RuntimeError("secret-bearing profile became a junction during cleanup")
-    if os.path.lexists(profile):
-        shutil.rmtree(profile)
+    shutil.rmtree(profile)
     if os.path.lexists(profile):
         raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
 
@@ -938,6 +956,7 @@ def materialize_profile(
     live_hash_before = sha256_file(live_config_path)
     live = load_live_config(live_config_path)
     profile = pathlib.Path(tempfile.mkdtemp(prefix="psr-codex-profile-", dir=str(temp_parent) if temp_parent else None))
+    profile_identity = _filesystem_object_identity(profile)
     try:
         acl_func(profile)
         initial_text = build_profile_text(live, arm, skill_path.as_posix(), mcp_path.as_posix())
@@ -960,6 +979,7 @@ def materialize_profile(
         live_hash_after = sha256_file(live_config_path)
         if live_hash_after != live_hash_before:
             raise RuntimeError("live Codex config changed during isolated profile materialization")
+        validate_profile_identity(profile, profile_identity)
         provider_name = live.get("model_provider")
         provider = (live.get("model_providers") or {}).get(provider_name) or {}
         meta = {
@@ -972,10 +992,11 @@ def materialize_profile(
             "effort": live.get("model_reasoning_effort"),
             "approval_policy": live.get("approval_policy"),
             "sandbox_mode": live.get("sandbox_mode"),
+            "_profile_filesystem_identity": profile_identity,
         }
         return profile, meta, final_skills, mcp_catalog
     except Exception:
-        remove_profile(profile)
+        remove_profile(profile, expected_identity=profile_identity)
         raise
 
 
@@ -1085,11 +1106,15 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
     if mcp_hash.casefold() != args.mcp_sha256.casefold():
         raise ValueError("Reliability MCP SHA256 mismatch")
     profile = None
+    profile_identity = None
     cleanup_ok = False
     try:
         profile, meta, skills, mcp_catalog = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
+        observed_profile_identity = _filesystem_object_identity(profile)
+        profile_identity = tuple(meta.get("_profile_filesystem_identity") or observed_profile_identity) if isinstance(meta, dict) else observed_profile_identity
+        validate_profile_identity(profile, profile_identity)
         identity = campaign_identity_payload(cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash, meta, model=args.model, public_main_sha=args.public_main_sha)
         identity_sha = verify_or_create_campaign_identity_lock(
             args.identity_lock, identity, allow_create=bool(args.initialize_identity_lock)
@@ -1113,7 +1138,7 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
         }
     finally:
         if profile is not None:
-            remove_profile(profile)
+            remove_profile(profile, expected_identity=profile_identity)
             cleanup_ok = not os.path.lexists(profile)
     result["cleanup_ok"] = cleanup_ok
     args.evidence_root.mkdir(parents=True, exist_ok=True)
@@ -1154,6 +1179,7 @@ def execute_run_row(
         raise FileExistsError(f"row evidence already exists: {output_dir}")
 
     profile = None
+    profile_identity = None
     workspace_materialized = False
     profile_cleanup_ok = False
     workspace_cleanup_ok = False
@@ -1163,18 +1189,25 @@ def execute_run_row(
         workspace = materialize_row_workspace(row)
         workspace_materialized = True
         runtime_boundary = capture_runtime_workspace_boundary(row, workspace)
-        profile, profile_meta, skills, _ = materialize(
-            args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
-        )
-        identity = campaign_identity_payload(
-            cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash,
-            profile_meta, model=args.model, public_main_sha=args.public_main_sha,
-        )
-        identity_sha = verify_or_create_campaign_identity_lock(
-            args.identity_lock, identity, allow_create=False
-        )
-        output_dir.mkdir(parents=True)
-        validate_runtime_workspace_boundary(row, workspace, expected=runtime_boundary)
+        try:
+            profile, profile_meta, skills, _ = materialize(
+                args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
+            )
+            observed_profile_identity = _filesystem_object_identity(profile)
+            profile_identity = tuple(profile_meta.get("_profile_filesystem_identity") or observed_profile_identity) if isinstance(profile_meta, dict) else observed_profile_identity
+            validate_profile_identity(profile, profile_identity)
+            identity = campaign_identity_payload(
+                cli_identity, args.skill_path, skill_hash, args.mcp_path, mcp_hash,
+                profile_meta, model=args.model, public_main_sha=args.public_main_sha,
+            )
+            identity_sha = verify_or_create_campaign_identity_lock(
+                args.identity_lock, identity, allow_create=False
+            )
+            output_dir.mkdir(parents=True)
+            validate_runtime_workspace_boundary(row, workspace, expected=runtime_boundary)
+        except Exception:
+            evaluate_manifest_row(row, workspace, runtime_boundary)
+            raise
         try:
             process_result = process_runner(
                 args.codex, workspace, profile, prompt_bytes,
@@ -1197,7 +1230,7 @@ def execute_run_row(
     finally:
         if profile is not None:
             try:
-                remove_profile(profile)
+                remove_profile(profile, expected_identity=profile_identity)
                 profile_cleanup_ok = not os.path.lexists(profile)
                 if not profile_cleanup_ok:
                     raise RuntimeError("secret-bearing profile cleanup left a residual filesystem entry")
