@@ -142,6 +142,16 @@ class TriggerEvalCampaignTests(unittest.TestCase):
                 attached = trigger_eval.attach_manifest([record], manifest)
                 self.assertFalse(attached[0]["first_command_matches_expectation"])
 
+    def test_attach_manifest_accepts_quote_equivalent_first_command_fragment(self):
+        manifest = [{"case_key": "C01-T01", "case_id": "C01", "trial_id": "T01", "group": "should_not_trigger", "title": "native version", "expected_first_command_fragment": "cmd.exe /d /c ver"}]
+        record = {"case_key": "C01-T01", "psr_skill_selected": False, "psr_skill_selected_before_first_command": False, "reliability_mcp_calls": 0, "selected_other_skills": [], "first_command_input": r'"C:\Program Files\PowerShell\7\pwsh.exe" -Command ''cmd.exe /d /c "ver > native-version.txt"'''}
+        attached = trigger_eval.attach_manifest([record], manifest)
+        self.assertTrue(attached[0]["first_command_matches_expectation"])
+
+    def test_quote_equivalence_does_not_bypass_component_collision_guard(self):
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", r'pwsh.exe -File .\not+"helper.cmd"'))
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", r'pwsh.exe -File .\not~"helper.cmd"'))
+
 
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):

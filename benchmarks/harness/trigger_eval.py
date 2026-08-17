@@ -193,10 +193,25 @@ def validate_expected_first_command_fragment(value) -> str | None:
     return value
 
 
+_QUOTE_OPEN_BOUNDARIES = set(":=({[,;|&<>")
+
+
+def _normalize_match_quotes(value: str) -> str:
+    chars = []
+    for char in value:
+        if char in "\"'":
+            previous = chars[-1] if chars else ""
+            if not chars or previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES:
+                chars.append(" ")
+            continue
+        chars.append(char)
+    return "".join(chars)
+
+
 def _norm_command(value: str | None) -> str:
     if value is None:
         return ""
-    normalized = value.lower().replace("/", "\\")
+    normalized = _normalize_match_quotes(value.lower().replace("/", "\\"))
     while "\\\\" in normalized:
         normalized = normalized.replace("\\\\", "\\")
     return " ".join(normalized.split())

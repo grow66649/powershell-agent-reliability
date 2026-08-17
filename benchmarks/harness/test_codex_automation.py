@@ -902,6 +902,25 @@ class RunRowWorkflowTests(unittest.TestCase):
             self.assertFalse(profile.exists())
             self.assertFalse(pathlib.Path(row["workspace"]).exists())
 
+    def test_execute_run_row_accepts_quoted_first_command_argument_variant(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(
+                root, expected_first_command_fragment="cmd.exe /d /c ver",
+            )
+            parsed = self._parsed_run(r'"C:\Program Files\PowerShell\7\pwsh.exe" -Command ''cmd.exe /d /c "ver > native-version.txt"''')
+            process = mock.Mock(return_value={
+                "exit_code": 0, "timed_out": False,
+                "termination_reason": "process_exit", "task_wall_clock_ms": 1,
+            })
+            receipt = codex_automation.execute_run_row(
+                args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                process_runner=process, json_parser=mock.Mock(return_value=parsed),
+            )
+            self.assertTrue(receipt["cleanup_ok"])
+            self.assertFalse(profile.exists())
+            self.assertFalse(pathlib.Path(row["workspace"]).exists())
+
     def test_execute_run_row_rejects_near_first_command_fragment_collision(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
