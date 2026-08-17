@@ -629,7 +629,6 @@ def detect_campaign_contamination(
     current_row: dict,
     coordinator_root: pathlib.Path,
 ) -> list[dict]:
-    coordinator_root = coordinator_root.resolve(strict=False)
     current_workspace = str(current_row.get("workspace") or "")
     current_key = _windows_path_key(current_workspace) if current_workspace else ""
     other_paths = []
@@ -639,17 +638,30 @@ def detect_campaign_contamination(
             continue
         if _windows_path_key(value) != current_key:
             other_paths.append(value)
+
+    def target_aliases(kind: str, value: pathlib.Path | str):
+        raw = pathlib.Path(value)
+        resolved = raw.resolve(strict=False)
+        canonical_hash = _known_path_sha256(resolved)
+        candidates = []
+        for candidate in (str(raw), str(resolved)):
+            key = _windows_path_key(candidate)
+            if key not in {_windows_path_key(item) for item in candidates}:
+                candidates.append(candidate)
+        return [(kind, candidate, canonical_hash) for candidate in candidates]
+
+    targets = target_aliases("coordinator_access", coordinator_root)
+    for value in other_paths:
+        targets.extend(target_aliases("other_row_workspace_access", value))
+
     evidence = []
     seen = set()
     for command in parsed.get("commands") or []:
         command_id = command.get("id")
         fields = [command.get("command"), command.get("cwd"), command.get("workdir")]
-        targets = [("coordinator_access", str(coordinator_root))]
-        targets.extend(("other_row_workspace_access", value) for value in other_paths)
-        for kind, target in targets:
+        for kind, target, path_sha256 in targets:
             if not any(_text_mentions_windows_path(value, target) for value in fields if isinstance(value, str)):
                 continue
-            path_sha256 = _known_path_sha256(target)
             identity = (kind, command_id, path_sha256)
             if identity in seen:
                 continue

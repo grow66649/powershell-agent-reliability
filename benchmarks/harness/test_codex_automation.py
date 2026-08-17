@@ -424,6 +424,23 @@ class ContaminationDetectionTests(unittest.TestCase):
             "path_sha256": codex_automation._known_path_sha256(resolved),
         }])
 
+    def test_detect_campaign_contamination_accepts_raw_windows_alias_of_resolved_coordinator(self):
+        raw = pathlib.Path("C:/Users/RUNNER~1/AppData/Local/Temp/campaign/coordinator")
+        canonical = pathlib.Path("C:/Users/runneradmin/AppData/Local/Temp/campaign/coordinator")
+        current = {"case_id": "X1", "trial_id": "T01", "arm": "S", "workspace": "C:/runtime/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        parsed = {"commands": [{"id": "c1", "type": "command_execution", "command": f"Get-ChildItem '{raw}'"}]}
+        real_resolve = pathlib.Path.resolve
+        def fake_resolve(path, strict=False):
+            if path == raw:
+                return canonical
+            return real_resolve(path, strict=strict)
+        with mock.patch.object(pathlib.Path, "resolve", autospec=True, side_effect=fake_resolve):
+            evidence = codex_automation.detect_campaign_contamination(parsed, [current], current, raw)
+        self.assertEqual(evidence, [{
+            "kind": "coordinator_access", "command_id": "c1",
+            "path_sha256": codex_automation._known_path_sha256(canonical),
+        }])
+
     def test_detect_campaign_contamination_reports_only_known_coordinator_or_other_row_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -647,10 +664,10 @@ class CampaignIdentityLockTests(unittest.TestCase):
             real_open = pathlib.Path.open
 
             def racing_open(path, mode="r", *args, **kwargs):
-                if path == lock and mode == "x":
-                    with real_open(lock, "w", encoding="utf-8", newline="\n") as handle:
+                if path.name == lock.name and mode == "x":
+                    with real_open(path, "w", encoding="utf-8", newline="\n") as handle:
                         handle.write(json.dumps(winner, sort_keys=True) + "\n")
-                    raise FileExistsError(str(lock))
+                    raise FileExistsError(str(path))
                 return real_open(path, mode, *args, **kwargs)
 
             with mock.patch.object(pathlib.Path, "open", autospec=True, side_effect=racing_open):

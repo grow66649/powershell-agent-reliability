@@ -53,10 +53,15 @@ class RoutingEvalPrepareTests(unittest.TestCase):
             prompt = pathlib.Path(by_arm["S"]["prompt_path"]).read_text(encoding="utf-8")
             self.assertIn("[CASE-ID: R01-T01]", prompt)
             self.assertEqual(json.loads(pathlib.Path(by_arm["S"]["fixture_path"]).read_text(encoding="utf-8")), _case()["files"])
-            runtime_root = runtime_parent / ("1" * 32)
+            runtime_root = pathlib.Path(rows[0]["runtime_root"])
+            expected_runtime_root = runtime_parent / ("1" * 32)
             self.assertTrue(runtime_root.is_dir())
+            self.assertEqual(runtime_root.resolve(strict=False), expected_runtime_root.resolve(strict=False))
             self.assertEqual(list(runtime_root.iterdir()), [])
-            self.assertEqual({pathlib.Path(row["workspace"]).parent for row in rows}, {runtime_root})
+            self.assertEqual(
+                {pathlib.Path(row["workspace"]).parent.resolve(strict=False) for row in rows},
+                {runtime_root.resolve(strict=False)},
+            )
             self.assertEqual({pathlib.Path(row["workspace"]).name for row in rows}, {"2" * 32, "3" * 32})
             self.assertTrue(all(not pathlib.Path(row["workspace"]).exists() for row in rows))
             for forbidden in ("powershell-reliability", "Reliability MCP", "arm S", "arm M"):
@@ -98,12 +103,14 @@ class RoutingEvalPrepareTests(unittest.TestCase):
             tokens = iter(["a" * 32, "b" * 32, "c" * 32])
             real_resolve = pathlib.Path.resolve
             real_link_check = routing_eval._path_is_link_or_junction
+            def is_target(path):
+                return path.name == raw_runtime_root.name and path.parent.name == runtime_parent.name
             def fake_resolve(path, strict=False):
-                if path == raw_runtime_root:
+                if is_target(path):
                     raise AssertionError("linked runtime root must be rejected before resolve")
                 return real_resolve(path, strict=strict)
             def fake_link_check(path):
-                return path == raw_runtime_root or real_link_check(path)
+                return is_target(path) or real_link_check(path)
             with mock.patch.object(pathlib.Path, "resolve", autospec=True, side_effect=fake_resolve):
                 with mock.patch.object(routing_eval, "_path_is_link_or_junction", side_effect=fake_link_check):
                     with self.assertRaisesRegex(ValueError, "runtime root.*symlink|junction"):
