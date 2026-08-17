@@ -58,6 +58,24 @@ class ProfileMaterializerTests(unittest.TestCase):
         self.assertNotIn('notify =', text)
         self.assertIn('plugins = false', text)
 
+    def test_build_profile_supports_builtin_openai_provider_without_custom_table(self):
+        live = _live_config()
+        live["model"] = "gpt-5.6-sol"
+        live["model_provider"] = "openai"
+        live["model_reasoning_effort"] = "high"
+        live.pop("model_providers")
+        text = codex_automation.build_profile_text(live, "S", PSR_SKILL, PSR_MCP)
+        self.assertIn('model = "gpt-5.6-sol"', text)
+        self.assertIn('model_provider = "openai"', text)
+        self.assertNotIn('[model_providers.openai]', text)
+        self.assertIn('[mcp_servers.psr_reliability_native]', text)
+
+    def test_build_profile_still_requires_table_for_custom_provider(self):
+        live = _live_config()
+        live.pop("model_providers")
+        with self.assertRaisesRegex(ValueError, "selected model provider table is missing"):
+            codex_automation.build_profile_text(live, "S", PSR_SKILL, PSR_MCP)
+
     def test_build_profile_sets_only_psr_skill_for_s_and_disables_it_for_m(self):
         s_text = codex_automation.build_profile_text(_live_config(), "S", PSR_SKILL, PSR_MCP)
         m_text = codex_automation.build_profile_text(_live_config(), "M", PSR_SKILL, PSR_MCP)
