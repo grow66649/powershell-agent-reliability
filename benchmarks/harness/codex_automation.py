@@ -157,6 +157,52 @@ def _path_is_link_or_junction(path: pathlib.Path) -> bool:
     return path.is_symlink() or bool(is_junction())
 
 
+def _filesystem_object_identity(path: pathlib.Path) -> tuple[int, int]:
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError("runtime boundary entry is missing or unreadable") from exc
+    return int(info.st_dev), int(info.st_ino)
+
+
+def validate_runtime_workspace_boundary(row: dict, workspace: pathlib.Path, expected=None, require_workspace: bool = True):
+    raw_runtime_root = pathlib.Path(row["runtime_root"])
+    raw_workspace = pathlib.Path(row["workspace"])
+    if _path_is_link_or_junction(raw_runtime_root) or _path_is_link_or_junction(raw_workspace):
+        raise RuntimeError("runtime root/workspace boundary changed to a symlink or junction")
+    runtime_root = raw_runtime_root.resolve(strict=False)
+    expected_workspace = raw_workspace.resolve(strict=False)
+    observed_workspace = pathlib.Path(workspace).resolve(strict=False)
+    if observed_workspace != expected_workspace or expected_workspace.parent != runtime_root:
+        raise RuntimeError("runtime root/workspace boundary containment changed")
+    if routing_eval.workspace_identity(str(runtime_root)) != row.get("runtime_root_sha256"):
+        raise RuntimeError("runtime root identity changed")
+    if routing_eval.workspace_identity(str(expected_workspace)) != row.get("workspace_sha256"):
+        raise RuntimeError("workspace identity changed")
+    if not runtime_root.is_dir():
+        raise RuntimeError("runtime root must remain a directory")
+    if require_workspace and not observed_workspace.is_dir():
+        raise RuntimeError("workspace must remain a directory")
+    current_root_identity = _filesystem_object_identity(raw_runtime_root)
+    current_workspace_identity = None
+    if require_workspace:
+        current_workspace_identity = _filesystem_object_identity(raw_workspace)
+    if expected is not None:
+        if current_root_identity != expected["runtime_root"]:
+            raise RuntimeError("runtime root filesystem identity changed")
+        if require_workspace and current_workspace_identity != expected["workspace"]:
+            raise RuntimeError("workspace filesystem identity changed")
+    return runtime_root, observed_workspace
+
+
+def capture_runtime_workspace_boundary(row: dict, workspace: pathlib.Path) -> dict:
+    runtime_root, observed_workspace = validate_runtime_workspace_boundary(row, workspace)
+    return {
+        "runtime_root": _filesystem_object_identity(runtime_root),
+        "workspace": _filesystem_object_identity(observed_workspace),
+    }
+
+
 def materialize_row_workspace(row: dict) -> pathlib.Path:
     raw_workspace = pathlib.Path(row["workspace"])
     raw_runtime_root = pathlib.Path(row["runtime_root"])
@@ -376,9 +422,20 @@ def codex_argv(exe: pathlib.Path, workspace: pathlib.Path, model: str | None = N
 
 
 def remove_profile(profile: pathlib.Path) -> None:
-    if profile.exists():
+    is_junction = getattr(profile, "is_junction", lambda: False)
+    if profile.is_symlink():
+        profile.unlink()
+        if os.path.lexists(profile):
+            raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
+        raise RuntimeError("secret-bearing profile became a symlink during cleanup")
+    if is_junction():
+        profile.rmdir()
+        if os.path.lexists(profile):
+            raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
+        raise RuntimeError("secret-bearing profile became a junction during cleanup")
+    if os.path.lexists(profile):
         shutil.rmtree(profile)
-    if profile.exists():
+    if os.path.lexists(profile):
         raise RuntimeError(f"secret-bearing profile cleanup failed: {profile}")
 
 
@@ -677,7 +734,9 @@ def validate_cli_terminal_state(process_result: dict, parsed: dict) -> None:
         raise ValueError("CLI JSONL is missing a terminal turn event")
 
 
-def evaluate_manifest_row(manifest_row: dict, workspace: pathlib.Path) -> dict:
+def evaluate_manifest_row(manifest_row: dict, workspace: pathlib.Path, runtime_boundary=None) -> dict:
+    if runtime_boundary is not None:
+        validate_runtime_workspace_boundary(manifest_row, workspace, expected=runtime_boundary)
     row = dict(manifest_row)
     row["workspace"] = str(workspace)
     rule = row.get("post_condition", {"kind": "none"})
@@ -1035,7 +1094,7 @@ def execute_profile_check(args, verify_cli=verify_cli_identity, materialize=mate
     finally:
         if profile is not None:
             remove_profile(profile)
-            cleanup_ok = not profile.exists()
+            cleanup_ok = not os.path.lexists(profile)
     result["cleanup_ok"] = cleanup_ok
     args.evidence_root.mkdir(parents=True, exist_ok=True)
     output = args.evidence_root / f"profile-check-{args.arm}.json"
@@ -1078,10 +1137,12 @@ def execute_run_row(
     workspace_materialized = False
     profile_cleanup_ok = False
     workspace_cleanup_ok = False
+    runtime_boundary = None
     cleanup_errors = []
     try:
         workspace = materialize_row_workspace(row)
         workspace_materialized = True
+        runtime_boundary = capture_runtime_workspace_boundary(row, workspace)
         profile, profile_meta, skills, _ = materialize(
             args.live_config, args.arm, args.skill_path, args.mcp_path, args.codex,
         )
@@ -1093,6 +1154,7 @@ def execute_run_row(
             args.identity_lock, identity, allow_create=False
         )
         output_dir.mkdir(parents=True)
+        validate_runtime_workspace_boundary(row, workspace, expected=runtime_boundary)
         try:
             process_result = process_runner(
                 args.codex, workspace, profile, prompt_bytes,
@@ -1100,9 +1162,9 @@ def execute_run_row(
                 model=args.model,
             )
         except Exception:
-            evaluate_manifest_row(row, workspace)
+            evaluate_manifest_row(row, workspace, runtime_boundary)
             raise
-        post_condition = evaluate_manifest_row(row, workspace)
+        post_condition = evaluate_manifest_row(row, workspace, runtime_boundary)
         parsed = json_parser(
             output_dir / "stdout.jsonl",
             allow_truncated_tail=bool(process_result.get("timed_out")),
@@ -1116,14 +1178,20 @@ def execute_run_row(
         if profile is not None:
             try:
                 remove_profile(profile)
-                profile_cleanup_ok = not profile.exists()
+                profile_cleanup_ok = not os.path.lexists(profile)
+                if not profile_cleanup_ok:
+                    raise RuntimeError("secret-bearing profile cleanup left a residual filesystem entry")
             except Exception as exc:
                 cleanup_errors.append(("profile", exc))
         if workspace_materialized:
             try:
+                if runtime_boundary is not None:
+                    validate_runtime_workspace_boundary(row, workspace, expected=runtime_boundary)
                 remove_runtime_workspace(workspace)
-                runtime_root = pathlib.Path(row["runtime_root"])
-                if _path_is_link_or_junction(runtime_root) or not runtime_root.is_dir() or any(runtime_root.iterdir()):
+                runtime_root, _ = validate_runtime_workspace_boundary(
+                    row, workspace, expected=runtime_boundary, require_workspace=False
+                )
+                if any(runtime_root.iterdir()):
                     raise RuntimeError("runtime root must be empty after row cleanup")
                 workspace_cleanup_ok = not os.path.lexists(workspace)
             except Exception as exc:

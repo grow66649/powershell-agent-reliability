@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -913,6 +914,15 @@ class RunRowWorkflowTests(unittest.TestCase):
                 codex_automation.remove_runtime_workspace(workspace)
         unlink.assert_called_once_with()
 
+    def test_remove_profile_fails_closed_on_dangling_symlink(self):
+        profile = pathlib.Path("C:/opaque/dangling-profile")
+        with mock.patch.object(os.path, "lexists", return_value=False), \
+             mock.patch.object(pathlib.Path, "is_symlink", return_value=True), \
+             mock.patch.object(pathlib.Path, "unlink") as unlink:
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                codex_automation.remove_profile(profile)
+        unlink.assert_called_once_with()
+
     def test_workspace_fixture_sha256_matches_prepared_text_tree(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = pathlib.Path(temp_dir)
@@ -929,6 +939,75 @@ class RunRowWorkflowTests(unittest.TestCase):
             (workspace / "helper.cmd").write_bytes(content.encode("utf-8"))
             expected = codex_automation.routing_eval._fixture_sha256({"helper.cmd": content})
             self.assertEqual(codex_automation.workspace_fixture_sha256(workspace), expected)
+
+    def test_execute_run_row_rejects_runtime_root_replacement_before_grading_or_recursive_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            runtime_root = pathlib.Path(row["runtime_root"])
+            replaced = {"value": False}
+            real_link_check = codex_automation._path_is_link_or_junction
+            def fake_link_check(path):
+                if pathlib.Path(path) == runtime_root and replaced["value"]:
+                    return True
+                return real_link_check(path)
+            def process_runner(_exe, workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                (workspace / "result.txt").write_text("READY\n", encoding="utf-8", newline="\n")
+                replaced["value"] = True
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            evaluate = mock.Mock(return_value={"passed": True, "source": "evaluator_workspace"})
+            remove_workspace = mock.Mock()
+            with mock.patch.object(codex_automation, "_path_is_link_or_junction", side_effect=fake_link_check), \
+                 mock.patch.object(codex_automation.routing_eval, "evaluate_workspace_state", evaluate), \
+                 mock.patch.object(codex_automation, "remove_runtime_workspace", remove_workspace):
+                with self.assertRaises(RuntimeError):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+                    )
+            evaluate.assert_not_called()
+            remove_workspace.assert_not_called()
+
+    def test_execute_run_row_rejects_regular_runtime_root_replacement_by_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            post = {"kind": "workspace_state", "mode": "all", "checks": [{"kind": "file_exists", "path": "result.txt"}]}
+            row, args, _profile, materialize, cli_identity = self._prepared_run(root, post_condition=post)
+            runtime_root = pathlib.Path(row["runtime_root"])
+            workspace = pathlib.Path(row["workspace"])
+            def process_runner(_exe, active_workspace, _profile, _prompt, _stdout, _stderr, _timeout, model=None):
+                shutil.rmtree(active_workspace)
+                runtime_root.rmdir()
+                runtime_root.mkdir()
+                workspace.mkdir()
+                (workspace / "result.txt").write_text("replacement\n", encoding="utf-8", newline="\n")
+                return {"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1}
+            evaluate = mock.Mock(return_value={"passed": True, "source": "evaluator_workspace"})
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with mock.patch.object(codex_automation.routing_eval, "evaluate_workspace_state", evaluate):
+                with self.assertRaises(RuntimeError):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process_runner, json_parser=mock.Mock(return_value=parsed),
+                    )
+            evaluate.assert_not_called()
+            self.assertTrue((workspace / "result.txt").is_file())
+
+    def test_execute_run_row_fails_closed_when_profile_entry_remains_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            row, args, profile, materialize, cli_identity = self._prepared_run(root)
+            process = mock.Mock(return_value={"exit_code": 0, "timed_out": False, "termination_reason": "process_exit", "task_wall_clock_ms": 1})
+            parsed = {"thread_id": "t", "turn_status": "completed", "native_command_count": 0, "incomplete_native_command_count": 0, "mcp_call_count": 0, "incomplete_mcp_call_count": 0, "reliability_mcp_call_count": 0, "commands": [], "mcp_calls": [], "truncated_jsonl_tail": False, "tokens": {name: None for name in codex_automation.TOKEN_FIELDS}, "final_message": "done", "errors": []}
+            with mock.patch.object(codex_automation, "remove_profile", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "profile"):
+                    codex_automation.execute_run_row(
+                        args, verify_cli=mock.Mock(return_value=cli_identity), materialize=materialize,
+                        process_runner=process, json_parser=mock.Mock(return_value=parsed),
+                    )
+            self.assertTrue(os.path.lexists(profile))
 
     def test_execute_run_row_rejects_preexisting_target_workspace_without_deleting_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:
