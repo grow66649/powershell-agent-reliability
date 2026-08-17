@@ -198,6 +198,30 @@ class TriggerEvalCampaignTests(unittest.TestCase):
         actual = "tools.shell_command({command:'helper.cmd', justification:'do it'})"
         self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
 
+    def test_structured_wrapper_ignores_wrapper_text_inside_metadata_before_command(self):
+        actual = """tools.shell_command({justification:'tools.shell_command({command:"helper.cmd"})', command:'echo wrong'})"""
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_supports_execution_field_after_metadata(self):
+        actual = "tools.shell_command({justification:'do it', command:'helper.cmd'})"
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_wrapper_rejects_malformed_execution_field_suffix(self):
+        actual = "tools.shell_command({command:'helper.cmd'junk})"
+        self.assertFalse(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_quote_equivalence_rejects_suffix_after_closed_quoted_token(self):
+        actual = 'cmd.exe /d /c "ver"suffix'
+        self.assertFalse(trigger_eval.command_fragment_matches("cmd.exe /d /c ver", actual))
+
+    def test_raw_command_with_wrapper_marker_inside_quotes_stays_raw(self):
+        actual = '''pwsh.exe -Command "Write-Output 'tools.shell_command({'; helper.cmd"'''
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
+    def test_structured_exec_wrapper_supports_execution_field_after_metadata(self):
+        actual = "const r = await tools.exec_command({timeout_ms:1000, cmd:'helper.cmd'}); text(r.output);"
+        self.assertTrue(trigger_eval.command_fragment_matches("helper.cmd", actual))
+
 
 class TriggerEvalDatasetContractTests(unittest.TestCase):
     def test_load_cases_rejects_malformed_first_command_expectation(self):

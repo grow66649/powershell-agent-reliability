@@ -210,40 +210,139 @@ def _command_component_char(value: str) -> bool:
     return not value.isspace() and value not in _COMMAND_FRAGMENT_BOUNDARIES
 
 
-_STRUCTURED_TOOL_COMMAND_RE = re.compile(
-    r"tools\.(?:shell_command\s*\(\{\s*command|exec_command\s*\(\{\s*cmd)\s*:\s*([\"'])",
+_STRUCTURED_TOOL_START_RE = re.compile(
+    r"tools\.(shell_command|exec_command)\s*\(\s*\{",
     re.IGNORECASE,
 )
 
 
-def _structured_tool_command(value: str) -> str | None:
-    match = _STRUCTURED_TOOL_COMMAND_RE.search(value)
-    if match is None:
-        return None
-    quote = match.group(1)
-    start = match.end()
-    index = start
+def _quote_is_escaped(value: str, index: int, start: int) -> bool:
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= start and value[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 1
+
+
+def _find_structured_tool_start(value: str):
+    quote = None
+    quote_start = 0
+    index = 0
     while index < len(value):
-        if value[index] == quote:
-            backslashes = 0
-            cursor = index - 1
-            while cursor >= start and value[cursor] == "\\":
-                backslashes += 1
-                cursor -= 1
-            if backslashes % 2 == 0:
-                return value[start:index]
+        char = value[index]
+        if quote is not None:
+            if char == quote and not _quote_is_escaped(value, index, quote_start):
+                quote = None
+            index += 1
+            continue
+        if char in {"\"", "'"}:
+            quote = char
+            quote_start = index + 1
+            index += 1
+            continue
+        match = _STRUCTURED_TOOL_START_RE.match(value, index)
+        if match is not None:
+            return match
         index += 1
     return None
+
+
+def _consume_quoted_string(value: str, index: int) -> tuple[str, int] | None:
+    quote = value[index]
+    start = index + 1
+    cursor = start
+    while cursor < len(value):
+        if value[cursor] == quote and not _quote_is_escaped(value, cursor, start):
+            return value[start:cursor], cursor + 1
+        cursor += 1
+    return None
+
+
+def _skip_structured_value(value: str, index: int) -> tuple[int, str] | None:
+    quote = None
+    quote_start = index
+    stack: list[str] = []
+    closers = {"(": ")", "[": "]", "{": "}"}
+    while index < len(value):
+        char = value[index]
+        if quote is not None:
+            if char == quote and not _quote_is_escaped(value, index, quote_start):
+                quote = None
+            index += 1
+            continue
+        if char in {"\"", "'"}:
+            quote = char
+            quote_start = index + 1
+        elif char in closers:
+            stack.append(closers[char])
+        elif char in {")", "]", "}"}:
+            if stack:
+                if char != stack[-1]:
+                    return None
+                stack.pop()
+            elif char == "}":
+                return index, char
+            else:
+                return None
+        elif char == "," and not stack:
+            return index, char
+        index += 1
+    return None
+
+
+def _structured_tool_command(value: str) -> tuple[bool, str | None]:
+    match = _find_structured_tool_start(value)
+    if match is None:
+        return False, None
+    target = "command" if match.group(1).lower() == "shell_command" else "cmd"
+    index = match.end()
+    while index < len(value):
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index >= len(value) or value[index] == "}":
+            return True, None
+        key_match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", value[index:])
+        if key_match is None:
+            return True, None
+        key = key_match.group(0).lower()
+        index += len(key_match.group(0))
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index >= len(value) or value[index] != ":":
+            return True, None
+        index += 1
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if key == target:
+            if index >= len(value) or value[index] not in {"\"", "'"}:
+                return True, None
+            parsed = _consume_quoted_string(value, index)
+            if parsed is None:
+                return True, None
+            command, index = parsed
+            while index < len(value) and value[index].isspace():
+                index += 1
+            if index >= len(value) or value[index] not in {",", "}"}:
+                return True, None
+            return True, command
+        boundary = _skip_structured_value(value, index)
+        if boundary is None:
+            return True, None
+        index, delimiter = boundary
+        if delimiter == "}":
+            return True, None
+        index += 1
+    return True, None
 
 
 def _command_match_candidates(value: str | None) -> list[str]:
     if not isinstance(value, str) or not value:
         return []
-    if re.search(r"tools\.(?:shell_command|exec_command)\s*\(\{", value, re.IGNORECASE):
-        command = _structured_tool_command(value)
+    recognized, command = _structured_tool_command(value)
+    if recognized:
         return [command] if command is not None else []
     return [value]
-
 
 def _left_fragment_boundary(command: str, index: int) -> bool:
     cursor = index - 1
@@ -253,6 +352,13 @@ def _left_fragment_boundary(command: str, index: int) -> bool:
         return True
     previous = command[cursor]
     return previous.isspace() or previous in _QUOTE_OPEN_BOUNDARIES or not _command_component_char(previous)
+
+
+def _right_fragment_boundary(command: str, end: int) -> bool:
+    cursor = end
+    while cursor < len(command) and command[cursor] in {"\"", "'"}:
+        cursor += 1
+    return cursor >= len(command) or not _command_component_char(command[cursor])
 
 
 def _cmd_c_single_token_quote_variant(fragment: str) -> str | None:
@@ -279,8 +385,7 @@ def _normalized_fragment_matches(fragment: str, command: str) -> bool:
         )
         right_ok = (
             not _command_component_char(fragment[-1])
-            or end == len(command)
-            or not _command_component_char(command[end])
+            or _right_fragment_boundary(command, end)
         )
         if left_ok and right_ok:
             return True
