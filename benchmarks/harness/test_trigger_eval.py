@@ -402,6 +402,26 @@ class TriggerEvalPrivacyTests(unittest.TestCase):
         self.assertNotIn("first_command_input", attached)
         self.assertRegex(attached["first_command_input_sha256"], r"^[0-9A-F]{64}$")
 
+
+class SkillRoutingContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = pathlib.Path(__file__).resolve().parents[2] / "skills" / "powershell-reliability" / "SKILL.md"
+        cls.skill_text = path.read_text(encoding="utf-8").lower()
+
+    def test_skill_requires_failure_from_current_user_requested_task_execution(self):
+        self.assertIn("current user-requested task", self.skill_text)
+        self.assertIn("historical", self.skill_text)
+        self.assertIn("hypothetical", self.skill_text)
+
+    def test_skill_does_not_promote_optional_probe_failure_into_task_boundary(self):
+        self.assertIn("optional inspection or probe", self.skill_text)
+        self.assertIn("requested task itself has not failed", self.skill_text)
+
+    def test_skill_preserves_exact_verification_semantics(self):
+        self.assertIn("exact content, bytes, or hash", self.skill_text)
+        self.assertIn("existence or size", self.skill_text)
+
 if __name__ == "__main__":
     unittest.main()
 
